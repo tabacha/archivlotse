@@ -143,7 +143,7 @@ Für den Titel-Schritt ist bereits ein sinnvoller Standard hinterlegt:
 ```yaml
 steps:
   title:
-    prompt: title.j2 # Datei in prompts/
+    prompt: title.j2 # Datei in archivlotse/prompts/
     ai_role: title # Rolle aus config/ai.yaml
 
     preprocessing:

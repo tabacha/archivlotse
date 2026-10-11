@@ -9,7 +9,7 @@ from .title import process_title
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="archivlotse")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command")
 
     title_parser = subparsers.add_parser(
         "title", help="Dokumenttitel aus OCR-Text berechnen und in Paperless aktualisieren"
@@ -30,6 +30,11 @@ def main(argv: list[str] | None = None) -> int:
     title_parser.add_argument("--db", default="data/archivlotse.db")
 
     args = parser.parse_args(argv)
+
+    if args.command is None:
+        parser.print_help()
+        return 1
+
     setup_logging()
 
     if args.command == "title":
