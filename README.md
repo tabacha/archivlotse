@@ -207,6 +207,7 @@ das steht ausschließlich hier:
 pipeline:
   - ocr_check
   - document_type
+  - correspondent
   - tags
   - title
 

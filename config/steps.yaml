@@ -10,13 +10,15 @@
 
 # Reihenfolge, in der "archivlotse process <id>" (ohne --step) die Schritte
 # ausfuehrt. Jeder Schritt liest das Dokument frisch aus Paperless, sieht
-# also Aenderungen vorheriger Schritte - deshalb document_type vor title
-# (title-Prompt nutzt den Dokumenttyp). Im --dry-run sieht ein spaeterer
-# Schritt die Aenderung eines frueheren Schritts NICHT, da dann nichts
-# tatsaechlich geschrieben wird.
+# also Aenderungen vorheriger Schritte - deshalb document_type vor
+# correspondent (nutzt document_type_name im Prompt) und beide vor title
+# (title-Prompt nutzt document_type_name UND correspondent_name als
+# Kontext). Im --dry-run sieht ein spaeterer Schritt die Aenderung eines
+# frueheren Schritts NICHT, da dann nichts tatsaechlich geschrieben wird.
 pipeline:
   - ocr_check
   - document_type
+  - correspondent
   - tags
   - title
 
@@ -92,9 +94,11 @@ steps:
 
   # Zweistufige Korrespondenten-Erkennung, siehe
   # TODO_paperless_korrespondeten_pipeline.md fuer die vollstaendige
-  # Herleitung der Schwellenwerte. Noch NICHT Teil von "pipeline:" oben -
-  # erst nach Kalibrierung an echten Dokumenten (siehe fuzzy_*_min_*
-  # unten, bewusst Beispiel-Startwerte) dort einhaengen.
+  # Herleitung der Schwellenwerte (fuzzy_*_min_* unten, bewusst
+  # Beispiel-Startwerte - ggf. an mehr echten Dokumenten nachjustieren).
+  # Bekannte Grenze: bei Kontoauszuegen (kein klarer Absender/Empfaenger-
+  # Briefkopf) liefert Schritt 1 oft KEINEN-GEFUNDEN statt der
+  # ausstellenden Bank - noch nicht behoben.
   correspondent:
     source_field: content
     target_field: correspondent
