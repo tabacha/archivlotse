@@ -6,11 +6,22 @@ Vorkenntnisse in Python-Paketierung.
 Aktueller Stand: ArchivLotse führt generische, in `config/steps.yaml`
 definierte Verarbeitungsschritte aus – ein Schritt liest ein Paperless-Feld
 (z. B. den OCR-Text), lässt ein KI-Modell daraus einen Wert erzeugen und
-schreibt das Ergebnis (optional) in ein anderes Paperless-Feld zurück.
-Bisher ist nur **ein** Schritt definiert: `title` (Titel aus OCR-Text).
-Weitere Schritte lassen sich rein über Config ergänzen (siehe Abschnitt
-3.3) – ohne Python-Code zu ändern. Alles Weitere aus der Projektidee
-(`doc/PROJEKTIDEE.md`, z. B. Klassifizierung, OCR-Verbesserung) ist noch
+schreibt das Ergebnis (optional) in ein anderes Paperless-Feld zurück. Es
+gibt zwei Arten von Schritten:
+
+- **Freitext-Schritte** wie `title`: die KI erzeugt frei formulierten Text
+  (z. B. einen Titel).
+- **Auswahl-Schritte** wie `document_type`: die KI muss sich für genau
+  einen von mehreren **bereits in Paperless vorhandenen** Werten
+  entscheiden (hier: einen Dokumenttyp). Ein Vorschlag, der zu keinem
+  vorhandenen Dokumenttyp passt, wird verworfen und **nicht** gespeichert.
+
+Weitere Freitext-Schritte lassen sich rein über Config ergänzen (siehe
+Abschnitt 3.3) – ohne Python-Code zu ändern; ein weiterer Auswahl-Schritt
+(z. B. für Korrespondenten oder Tags) braucht zusätzlich eine kleine
+Codeänderung (eine neue Zeile in `CANDIDATE_FETCHERS` in
+`archivlotse/pipeline.py`). Alles Weitere aus der Projektidee
+(`doc/PROJEKTIDEE.md`, z. B. OCR-Verbesserung, Custom Fields) ist noch
 nicht gebaut.
 
 ## 1. Voraussetzungen
@@ -125,9 +136,13 @@ roles:
     provider: ollama_lokal
     model: "llama3.1" # Name des Modells, das in Ollama geladen ist
 
+  document_type:
+    provider: scaleway
+    model: "mistral-small-3.2-24b-instruct-2506" # guenstig, reicht fuer Klassifizierung
+
   precise:
     provider: scaleway
-    model: "llama-3.1-8b-instruct" # wird z.B. mit --ai-role precise genutzt
+    model: "llama-3.3-70b-instruct" # wird z.B. mit --ai-role precise genutzt
 ```
 
 Du brauchst nur die Provider zu pflegen, die du tatsächlich in `roles:`
@@ -166,12 +181,44 @@ Für den mitgelieferten Titel-Schritt musst du hier normalerweise nichts
 ändern – nur wenn du z. B. einen anderen Prompt ausprobieren oder die
 maximale Titellänge anpassen möchtest.
 
-**Einen neuen Schritt hinzufügen** geht rein über Config, ohne
+**Einen neuen Freitext-Schritt hinzufügen** geht rein über Config, ohne
 Python-Code zu ändern: eine `.j2`-Prompt-Datei unter `archivlotse/prompts/`
 anlegen, einen neuen Eintrag unter `steps:` ergänzen (mit `source_field`,
 `target_field`, `prompt`, `ai_role`) und bei Bedarf eine passende Rolle in
 `config/ai.yaml`. Der Prompt bekommt den (ggf. gekürzten) Inhalt von
 `source_field` als Variable `{{ input_text }}`.
+
+**Auswahl-Schritt `document_type`:** hier muss die KI sich für einen der
+tatsächlich in Paperless vorhandenen Dokumenttypen entscheiden, statt
+freien Text zu erzeugen:
+
+```yaml
+  document_type:
+    source_field: content
+    target_field: document_type
+
+    prompt: document_type.j2
+    ai_role: document_type
+
+    # Laedt die vorhandenen Dokumenttypen ueber die Paperless-API und gibt
+    # sie dem Prompt als Kandidatenliste mit. Ein Vorschlag, der zu keinem
+    # davon passt, wird verworfen statt gespeichert.
+    candidates_endpoint: document_types
+
+    preprocessing:
+      max_input_chars: 8000
+
+    postprocessing:
+      strip_quotes: true
+      max_length: 200
+```
+
+Der Prompt (`archivlotse/prompts/document_type.j2`) bekommt zusätzlich zu
+`{{ input_text }}` die Liste `{{ candidate_names }}` (alle vorhandenen
+Dokumenttypnamen) und ist angewiesen, exakt `UNBEKANNT` zu antworten, wenn
+keiner passt. Geschrieben wird in Paperless die **ID** des passenden
+Dokumenttyps (`document_type` erwartet in der API eine ID, keinen Namen);
+im Audit-Log stehen aber die lesbaren Namen, nicht die IDs.
 
 ## 4. Erster Testlauf (Dry-Run)
 
@@ -182,11 +229,12 @@ du ein Dokument öffnest).
 
 ```bash
 archivlotse process 6023 --step title --dry-run
+archivlotse process 6023 --step document_type --dry-run
 ```
 
-Die Ausgabe zeigt unter anderem, welcher Titel vorgeschlagen wird und ob
-er sich vom aktuellen Titel unterscheidet. Es wird aber nichts in
-Paperless gespeichert.
+Die Ausgabe zeigt unter anderem, welcher Titel bzw. Dokumenttyp
+vorgeschlagen wird und ob er sich vom aktuellen Wert unterscheidet. Es
+wird aber nichts in Paperless gespeichert.
 
 ## 5. Echter Lauf
 
@@ -249,6 +297,11 @@ ARCHIVLOTSE_LOG_LEVEL=DEBUG archivlotse process 6023 --step title --dry-run
   jeweiligen Scaleway-Provider in `config/ai.yaml` ausfüllen.
 - `Unbekannter Verarbeitungsschritt 'title' in config/steps.yaml` →
   `config/steps.yaml` fehlt oder wurde versehentlich verändert/gelöscht.
+- Log-Zeile „KI-Vorschlag ... entspricht keinem vorhandenen Kandidaten,
+  wird verworfen" beim `document_type`-Schritt → kein Fehler, sondern die
+  eingebaute Validierung: die KI hat etwas vorgeschlagen, das nicht
+  exakt einem vorhandenen Dokumenttyp entspricht, und der Vorschlag wurde
+  bewusst **nicht** übernommen.
 
 ## 9. Tests ausführen (optional, für Entwickler)
 

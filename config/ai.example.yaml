@@ -6,9 +6,8 @@
 #    Rollen weiter unten denselben Cloud-Dienst benutzen.
 #
 # 2) Unter "roles" pro logischer Aufgabe festlegen, welcher Provider und
-#    welches Modell benutzt wird. "title" ist die Rolle fuer den
-#    Titel-Schritt (archivlotse title ...); weitere Rollen (z.B. fuer
-#    spaetere Schritte) koennen beliebig ergaenzt werden.
+#    welches Modell benutzt wird. Jede Rolle wird in config/steps.yaml
+#    von genau einem Schritt referenziert (z.B. "title", "document_type").
 
 providers:
   ollama_lokal:
@@ -25,8 +24,16 @@ roles:
     provider: ollama_lokal
     model: "qwen3:4b-instruct"
 
-  # Beispiel: eine zweite Rolle nutzt denselben Scaleway-Zugang mit einem
-  # anderen Modell, ohne den API-Key erneut eintragen zu muessen.
+  # Klassifizierung (ein Label aus einer kurzen Liste waehlen) braucht
+  # kein grosses/teures Modell - mistral-small ist auf Scaleway aktuell
+  # das guenstigste Modell mit guter Mehrsprachigkeit.
+  document_type:
+    provider: scaleway
+    model: "mistral-small-3.2-24b-instruct-2506"
+
+  # Beispiel: eine weitere Rolle nutzt denselben Scaleway-Zugang mit einem
+  # staerkeren Modell fuer komplexere Aufgaben, ohne den API-Key erneut
+  # eintragen zu muessen.
   precise:
     provider: scaleway
-    model: "llama-3.1-8b-instruct"
+    model: "llama-3.3-70b-instruct"

@@ -29,3 +29,23 @@ steps:
       # Zur Sicherheit auf maximal so viele Zeichen kuerzen, falls sich
       # das Modell nicht an die Laengenvorgabe im Prompt haelt.
       max_length: 120
+
+  document_type:
+    source_field: content
+    target_field: document_type
+
+    prompt: document_type.j2
+    ai_role: document_type
+
+    # Die KI muss einen der tatsaechlich in Paperless vorhandenen
+    # Dokumenttypen waehlen (per /api/document_types/ geladen) statt
+    # freien Text zu erzeugen. Ein Vorschlag, der keinem vorhandenen
+    # Dokumenttyp entspricht, wird verworfen statt gespeichert.
+    candidates_endpoint: document_types
+
+    preprocessing:
+      max_input_chars: 8000
+
+    postprocessing:
+      strip_quotes: true
+      max_length: 200

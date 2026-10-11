@@ -16,6 +16,7 @@ class StepConfig:
     max_input_chars: int = 8000
     strip_quotes: bool = True
     max_output_length: int | None = None
+    candidates_endpoint: str | None = None
 
 
 def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepConfig:
@@ -28,6 +29,13 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
     Paperless field to write the result to (target_field). The Python
     pipeline code itself has no knowledge of what "title" or any other
     specific field/step means - that all lives here.
+
+    If candidates_endpoint is set (e.g. "document_types"), the step picks
+    one value out of an existing Paperless list instead of generating
+    free text: the prompt is given the current candidate names, and the
+    AI's answer is validated against that list before anything is written
+    back - an answer that doesn't match an existing candidate is rejected
+    rather than applied.
     """
     data = load_yaml(path)
     steps = data.get("steps", {})
@@ -52,4 +60,5 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
         max_input_chars=preprocessing.get("max_input_chars", 8000),
         strip_quotes=postprocessing.get("strip_quotes", True),
         max_output_length=postprocessing.get("max_length"),
+        candidates_endpoint=step.get("candidates_endpoint"),
     )
