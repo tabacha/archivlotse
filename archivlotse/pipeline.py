@@ -118,6 +118,26 @@ def _resolve_document_type_name(
     return None
 
 
+def _resolve_correspondent_name(
+    document: dict, paperless: PaperlessClient, conn: sqlite3.Connection, force: bool = False
+) -> str | None:
+    """Resolve the document's current correspondent ID to its name, so it
+    can be exposed to prompt templates as `correspondent_name` (e.g. so
+    title.j2 can use it as context - NOT to print it into the title
+    itself, since it's already stored in its own field). Returns None if
+    no correspondent is set. Note: fetches the full correspondents list
+    (~1000 on this instance) via the same 2h candidate_cache as the
+    correspondent step - the first call after the cache expires can take
+    a while, same as that step's own candidate fetch."""
+    correspondent_id = document.get("correspondent")
+    if correspondent_id is None:
+        return None
+    for candidate in _get_candidates(conn, paperless, "correspondents", force):
+        if candidate["id"] == correspondent_id:
+            return candidate["name"]
+    return None
+
+
 def _condition_met(step_config: StepConfig, document: dict, document_type_name: str | None) -> bool:
     if not step_config.condition:
         return True
@@ -421,6 +441,7 @@ def _process_text_step(
     document = paperless.get_document(document_id)
 
     document_type_name = _resolve_document_type_name(document, paperless, conn, force)
+    correspondent_name = _resolve_correspondent_name(document, paperless, conn, force)
     if not _condition_met(step_config, document, document_type_name):
         logger.info(
             "Dokument %s, Schritt %r: Bedingung %r nicht erfüllt, Schritt übersprungen",
@@ -456,6 +477,7 @@ def _process_text_step(
         ai_config.model,
         postprocessing_signature,
         document_type_name or "",
+        correspondent_name or "",
     )
 
     cached = None if force else get_cached_step_result(conn, step_config.name, document_id, fingerprint)
@@ -470,7 +492,10 @@ def _process_text_step(
         )
     else:
         prompt = render_prompt(
-            step_config.prompt, input_text=truncated_text, document_type_name=document_type_name
+            step_config.prompt,
+            input_text=truncated_text,
+            document_type_name=document_type_name,
+            correspondent_name=correspondent_name,
         )
         ai_client = build_ai_client(ai_config)
         logger.info(

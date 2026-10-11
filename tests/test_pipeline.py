@@ -197,6 +197,73 @@ def test_process_step_recomputes_when_input_changes(monkeypatch, tmp_path):
     assert fake_ai.calls == 2
 
 
+def test_text_step_passes_correspondent_name_to_prompt(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(correspondents=CORRESPONDENTS)
+    fake_paperless.document["correspondent"] = 3  # "ACME GmbH"
+    fake_ai = FakeAIClient()
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_paperless_config",
+        lambda path: PaperlessConfig(url="http://paperless.example", token="t"),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_ai_config",
+        lambda role, path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
+    )
+    monkeypatch.setattr(pipeline_module, "load_step_config", lambda name, path: FAKE_STEP_CONFIG)
+    monkeypatch.setattr(pipeline_module, "PaperlessClient", lambda config: fake_paperless)
+    monkeypatch.setattr(pipeline_module, "build_ai_client", lambda config: fake_ai)
+
+    captured = {}
+    original_render = pipeline_module.render_prompt
+
+    def capturing_render(name, **kwargs):
+        captured.update(kwargs)
+        return original_render(name, **kwargs)
+
+    monkeypatch.setattr(pipeline_module, "render_prompt", capturing_render)
+
+    pipeline_module.process_step(step_name="title", document_id=1, db_path=str(tmp_path / "test.db"))
+
+    assert captured["correspondent_name"] == "ACME GmbH"
+
+
+def test_text_step_recomputes_when_correspondent_changes(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(correspondents=CORRESPONDENTS)
+    fake_paperless.document["correspondent"] = 1  # "Mueller GmbH"
+    fake_ai = FakeAIClient(title="Titel A")
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_paperless_config",
+        lambda path: PaperlessConfig(url="http://paperless.example", token="t"),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_ai_config",
+        lambda role, path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
+    )
+    monkeypatch.setattr(pipeline_module, "load_step_config", lambda name, path: FAKE_STEP_CONFIG)
+    monkeypatch.setattr(pipeline_module, "PaperlessClient", lambda config: fake_paperless)
+    monkeypatch.setattr(pipeline_module, "build_ai_client", lambda config: fake_ai)
+
+    db_path = str(tmp_path / "test.db")
+    pipeline_module.process_step(step_name="title", document_id=1, db_path=db_path)
+    assert fake_ai.calls == 1
+
+    # Gleicher Text, aber ein anderer Korrespondent ist jetzt gesetzt -
+    # Titel-Prompt bekommt correspondent_name als Kontext, also muss sich
+    # der Fingerprint aendern.
+    fake_paperless.document["correspondent"] = 2  # "Mueller Handel GmbH"
+    fake_ai.title = "Titel B"
+
+    result = pipeline_module.process_step(step_name="title", document_id=1, db_path=db_path)
+    assert result == "Titel B"
+    assert fake_ai.calls == 2
+
+
 FAKE_CHOICE_STEP_CONFIG = StepConfig(
     name="document_type",
     prompt="document_type.j2",

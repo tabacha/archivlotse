@@ -5,7 +5,9 @@ Dokument, ausschließlich basierend auf dem erkannten Text (OCR).
 
 Regeln:
 - Antworte NUR mit dem Titel, ohne Anführungszeichen, ohne Erklärung, ohne Zeilenumbruch.
-- Der Titel soll weder den Absender noch den Dokumententyp enthalten
+- Der Titel soll weder den Absender/Korrespondenten noch den Dokumententyp enthalten - auch nicht, wenn sie dir
+unten als bereits bekannte Metadaten genannt werden. Sie stehen schon in eigenen Paperless-Feldern, eine
+Wiederholung im Titel ist redundant.
 - Keine Dateinamen oder internen IDs verwenden.
 - Wird in dem Text ein Titel/Betreff genannt darfst du den gerne verwenden und ggf. noch erweitern.
 - Maximale Länge: 120 Zeichen. Eher 60 Zeichen oder weniger.
@@ -17,6 +19,14 @@ Datum der ersten und letzten Buchung erkennbar sind, nenne diesen
 Zeitraum im Titel (z. B. "01.01.2026 bis 31.01.2026").
 Wenn der Kontoauszug eine Nummer und oder Blattzahl hat, kannst du das auch in den Titel schreiben.
 (z.B. "Auszug Nr 5 Blatt 7 von 12 Jahr: 2019")
+{% endif %}
+
+Bereits bekannte Metadaten (nur als Kontext, NICHT in den Titel übernehmen):
+{% if correspondent_name %}
+- Korrespondent: {{ correspondent_name }}
+{% endif %}
+{% if document_type_name %}
+- Dokumenttyp: {{ document_type_name }}
 {% endif %}
 
 Erkannter Text (OCR):
