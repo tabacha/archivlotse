@@ -3,6 +3,19 @@ from __future__ import annotations
 import httpx
 
 
+def _format_errors(errors: list[dict] | None) -> str:
+    """Docling's response includes a structured "errors" list (component,
+    module, message, page) on failure - surface it instead of just the
+    bare status, e.g. to see at a glance that a failure was PIL's
+    decompression-bomb guard on an oversized rendered page, not a
+    generic/unknown failure."""
+    if not errors:
+        return "keine Details in der Docling-Antwort"
+    return "; ".join(
+        f"Seite {error.get('page_no', '?')}: {error.get('error_message', error)}" for error in errors
+    )
+
+
 class DoclingClient:
     """Client for a Docling Serve instance (document conversion/OCR)."""
 
@@ -19,7 +32,10 @@ class DoclingClient:
         data = response.json()
         status = data.get("status")
         if status not in ("success", "partial_success"):
-            raise RuntimeError(f"Docling-Konvertierung fehlgeschlagen (status={status!r})")
+            raise RuntimeError(
+                f"Docling-Konvertierung fehlgeschlagen (status={status!r}): "
+                f"{_format_errors(data.get('errors'))}"
+            )
         return data["document"].get("text_content") or ""
 
     def close(self) -> None:
