@@ -18,7 +18,9 @@ FAKE_STEP_CONFIG = StepConfig(
 
 
 class FakePaperlessClient:
-    def __init__(self, document_types=None, tags=None, original_bytes=b"%PDF-fake%"):
+    def __init__(
+        self, document_types=None, tags=None, correspondents=None, original_bytes=b"%PDF-fake%"
+    ):
         self.document = {
             "id": 1,
             "title": "Alter Titel",
@@ -27,10 +29,12 @@ class FakePaperlessClient:
         self.update_calls: list[tuple[str, object]] = []
         self.document_types = document_types or []
         self.tags = tags or []
+        self.correspondents = correspondents or []
         self.original_bytes = original_bytes
         self.download_calls = 0
         self.list_document_types_calls = 0
         self.list_tags_calls = 0
+        self.list_correspondents_calls = 0
 
     def __enter__(self):
         return self
@@ -52,6 +56,10 @@ class FakePaperlessClient:
     def list_tags(self):
         self.list_tags_calls += 1
         return list(self.tags)
+
+    def list_correspondents(self):
+        self.list_correspondents_calls += 1
+        return list(self.correspondents)
 
     def download_original(self, document_id):
         self.download_calls += 1
@@ -742,3 +750,219 @@ def test_step_results_store_token_usage_and_cost(monkeypatch, tmp_path):
     assert row["prompt_tokens"] == 123
     assert row["completion_tokens"] == 45
     assert row["estimated_cost_usd"] == 123 / 1_000_000 * 1.0 + 45 / 1_000_000 * 2.0
+
+
+FAKE_CORRESPONDENT_STEP_CONFIG = StepConfig(
+    name="correspondent",
+    prompt="correspondent-step1.j2",
+    ai_role="correspondent_step1",
+    source_field="content",
+    target_field="correspondent",
+    candidates_endpoint="correspondents",
+    prompt_step2="correspondent-step2.j2",
+    ai_role_step2="correspondent_step2",
+    fuzzy_assign_min_score=95.0,
+    fuzzy_assign_min_gap=8.0,
+    fuzzy_review_min_score=80.0,
+    fuzzy_candidate_limit=5,
+)
+
+# Deliberately includes two similarly-named candidates ("Mueller GmbH" /
+# "Mueller Handel GmbH") so a query like "Müller GmbH" is a genuinely
+# ambiguous fuzzy match (gap < fuzzy_assign_min_gap) - see
+# TODO_paperless_korrespondenten_pipeline.md's own "Allianz Versicherung
+# vs. Lebensversicherung" example for why this can't be resolved by score
+# alone.
+CORRESPONDENTS = [
+    {"id": 1, "name": "Mueller GmbH"},
+    {"id": 2, "name": "Mueller Handel GmbH"},
+    {"id": 3, "name": "ACME GmbH"},
+]
+
+
+def _patch_correspondent_common(monkeypatch, fake_paperless, ai_client_by_role):
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_paperless_config",
+        lambda path: PaperlessConfig(url="http://paperless.example", token="t"),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_ai_config",
+        lambda role, path: AIConfig(provider="scaleway", base_url="http://scaleway.example", model=role),
+    )
+    monkeypatch.setattr(
+        pipeline_module, "load_step_config", lambda name, path: FAKE_CORRESPONDENT_STEP_CONFIG
+    )
+    monkeypatch.setattr(pipeline_module, "PaperlessClient", lambda config: fake_paperless)
+    monkeypatch.setattr(pipeline_module, "build_ai_client", lambda config: ai_client_by_role[config.model])
+
+
+def test_correspondent_step_assigns_confident_match_without_step2(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(correspondents=CORRESPONDENTS)
+    step1_ai = FakeAIClient(title="ACME GmbH")
+    step2_ai = FakeAIClient(title="sollte nie aufgerufen werden")
+    _patch_correspondent_common(
+        monkeypatch,
+        fake_paperless,
+        {"correspondent_step1": step1_ai, "correspondent_step2": step2_ai},
+    )
+
+    result = pipeline_module.process_step(
+        step_name="correspondent", document_id=1, db_path=str(tmp_path / "test.db")
+    )
+
+    assert result == "ACME GmbH"
+    assert fake_paperless.update_calls == [("correspondent", 3)]
+    assert step1_ai.calls == 1
+    assert step2_ai.calls == 0  # eindeutiger Treffer, keine Disambiguierung noetig
+
+
+def test_correspondent_step_ambiguous_match_resolved_by_step2(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(correspondents=CORRESPONDENTS)
+    step1_ai = FakeAIClient(title="Müller GmbH")
+    # Step2 waehlt bewusst NICHT den naechstbesten Fuzzy-Treffer (id 1),
+    # sondern den anderen plausiblen Kandidaten - zeigt, dass Step2 die
+    # Entscheidung wirklich selbst trifft statt den Fuzzy-Score zu bestaetigen.
+    step2_ai = FakeAIClient(title="Mueller Handel GmbH")
+    _patch_correspondent_common(
+        monkeypatch,
+        fake_paperless,
+        {"correspondent_step1": step1_ai, "correspondent_step2": step2_ai},
+    )
+
+    result = pipeline_module.process_step(
+        step_name="correspondent", document_id=1, db_path=str(tmp_path / "test.db")
+    )
+
+    assert result == "Mueller Handel GmbH"
+    assert fake_paperless.update_calls == [("correspondent", 2)]
+    assert step1_ai.calls == 1
+    assert step2_ai.calls == 1
+
+
+def test_correspondent_step_step1_sentinel_skips_everything(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(correspondents=CORRESPONDENTS)
+    step1_ai = FakeAIClient(title="KEINEN-GEFUNDEN")
+    step2_ai = FakeAIClient(title="sollte nie aufgerufen werden")
+    _patch_correspondent_common(
+        monkeypatch,
+        fake_paperless,
+        {"correspondent_step1": step1_ai, "correspondent_step2": step2_ai},
+    )
+
+    result = pipeline_module.process_step(
+        step_name="correspondent", document_id=1, db_path=str(tmp_path / "test.db")
+    )
+
+    assert result is None
+    assert fake_paperless.update_calls == []
+    assert step2_ai.calls == 0
+
+
+def test_correspondent_step_weak_fuzzy_match_leaves_unassigned(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(correspondents=CORRESPONDENTS)
+    step1_ai = FakeAIClient(title="Voellig Fremde Firma Ltd")
+    step2_ai = FakeAIClient(title="sollte nie aufgerufen werden")
+    _patch_correspondent_common(
+        monkeypatch,
+        fake_paperless,
+        {"correspondent_step1": step1_ai, "correspondent_step2": step2_ai},
+    )
+
+    result = pipeline_module.process_step(
+        step_name="correspondent", document_id=1, db_path=str(tmp_path / "test.db")
+    )
+
+    assert result is None
+    assert fake_paperless.update_calls == []
+    assert step2_ai.calls == 0  # Score unter fuzzy_review_min_score
+
+
+def test_correspondent_step_step2_sentinel_leaves_unassigned(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(correspondents=CORRESPONDENTS)
+    step1_ai = FakeAIClient(title="Müller GmbH")
+    step2_ai = FakeAIClient(title="KEINEN-GEFUNDEN")
+    _patch_correspondent_common(
+        monkeypatch,
+        fake_paperless,
+        {"correspondent_step1": step1_ai, "correspondent_step2": step2_ai},
+    )
+
+    result = pipeline_module.process_step(
+        step_name="correspondent", document_id=1, db_path=str(tmp_path / "test.db")
+    )
+
+    assert result is None
+    assert fake_paperless.update_calls == []
+
+
+def test_correspondent_step_step2_new_name_is_not_auto_created(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(correspondents=CORRESPONDENTS)
+    step1_ai = FakeAIClient(title="Müller GmbH")
+    # Step2 schlaegt einen Namen vor, der zu KEINEM vorgelegten Kandidaten
+    # passt - darf NIE automatisch als neuer Korrespondent angelegt werden.
+    step2_ai = FakeAIClient(title="Voellig Neue Firma GmbH")
+    _patch_correspondent_common(
+        monkeypatch,
+        fake_paperless,
+        {"correspondent_step1": step1_ai, "correspondent_step2": step2_ai},
+    )
+
+    result = pipeline_module.process_step(
+        step_name="correspondent", document_id=1, db_path=str(tmp_path / "test.db")
+    )
+
+    assert result is None
+    assert fake_paperless.update_calls == []
+
+
+def test_correspondent_step_is_idempotent_for_both_stages(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(correspondents=CORRESPONDENTS)
+    step1_ai = FakeAIClient(title="Müller GmbH")
+    step2_ai = FakeAIClient(title="Mueller Handel GmbH")
+    _patch_correspondent_common(
+        monkeypatch,
+        fake_paperless,
+        {"correspondent_step1": step1_ai, "correspondent_step2": step2_ai},
+    )
+    db_path = str(tmp_path / "test.db")
+
+    pipeline_module.process_step(step_name="correspondent", document_id=1, db_path=db_path)
+    assert step1_ai.calls == 1
+    assert step2_ai.calls == 1
+
+    # Zweiter Lauf: unveraenderte Eingabe -> beide Stufen aus dem Cache,
+    # kein erneuter KI-Aufruf.
+    pipeline_module.process_step(step_name="correspondent", document_id=1, db_path=db_path)
+    assert step1_ai.calls == 1
+    assert step2_ai.calls == 1
+
+
+def test_correspondent_step_only_passes_plausible_candidates_to_step2(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(correspondents=CORRESPONDENTS)
+    step1_ai = FakeAIClient(title="Müller GmbH")
+    step2_ai = FakeAIClient(title="Mueller Handel GmbH")
+    _patch_correspondent_common(
+        monkeypatch,
+        fake_paperless,
+        {"correspondent_step1": step1_ai, "correspondent_step2": step2_ai},
+    )
+
+    captured = {}
+    original_render = pipeline_module.render_prompt
+
+    def capturing_render(name, **kwargs):
+        if name == "correspondent-step2.j2":
+            captured.update(kwargs)
+        return original_render(name, **kwargs)
+
+    monkeypatch.setattr(pipeline_module, "render_prompt", capturing_render)
+
+    pipeline_module.process_step(
+        step_name="correspondent", document_id=1, db_path=str(tmp_path / "test.db")
+    )
+
+    # "ACME GmbH" liegt mit Score 32.7 unter fuzzy_review_min_score (80) -
+    # wird NICHT an Schritt 2 weitergegeben, nur die beiden Mueller-Kandidaten.
+    assert set(captured["correspondent_names"]) == {"Mueller GmbH", "Mueller Handel GmbH"}

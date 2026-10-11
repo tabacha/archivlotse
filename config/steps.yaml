@@ -90,6 +90,43 @@ steps:
       strip_quotes: true
       max_length: 500
 
+  # Zweistufige Korrespondenten-Erkennung, siehe
+  # TODO_paperless_korrespondeten_pipeline.md fuer die vollstaendige
+  # Herleitung der Schwellenwerte. Noch NICHT Teil von "pipeline:" oben -
+  # erst nach Kalibrierung an echten Dokumenten (siehe fuzzy_*_min_*
+  # unten, bewusst Beispiel-Startwerte) dort einhaengen.
+  correspondent:
+    source_field: content
+    target_field: correspondent
+
+    # Stufe 1: wahrscheinlichen Namen aus dem Text extrahieren (freier
+    # Text, kein Kandidatenabgleich durch die KI selbst).
+    prompt: correspondent-step1.j2
+    ai_role: correspondent_step1
+
+    # RapidFuzz vergleicht den extrahierten Namen deterministisch mit
+    # allen vorhandenen Korrespondenten (/api/correspondents/).
+    candidates_endpoint: correspondents
+
+    # Stufe 2: nur bei mehrdeutigem Fuzzy-Ergebnis aufgerufen, mit den
+    # paar aehnlichsten Kandidaten zur Disambiguierung.
+    prompt_step2: correspondent-step2.j2
+    ai_role_step2: correspondent_step2
+
+    # Beispiel-Startwerte (siehe TODO-Datei) - mit echten Dokumenten
+    # kalibrieren, bevor automatisch zugeordnet wird:
+    fuzzy_assign_min_score: 95.0
+    fuzzy_assign_min_gap: 8.0
+    fuzzy_review_min_score: 80.0
+    fuzzy_candidate_limit: 5
+
+    preprocessing:
+      max_input_chars: 8000
+
+    postprocessing:
+      strip_quotes: true
+      max_length: 200
+
   title:
     # Paperless-Feld, das als Eingabetext fuer den Prompt gelesen wird.
     source_field: content

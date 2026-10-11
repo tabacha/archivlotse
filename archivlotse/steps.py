@@ -35,6 +35,26 @@ class StepConfig:
     # "document_type" dessen aufgeloester Name) dem erwarteten Wert
     # entspricht, z.B. {"document_type": "Kontoauszug"}.
     condition: dict[str, str] | None = None
+    # Nur fuer Korrespondenten-Schritte (prompt_step2 gesetzt): zweistufige
+    # Erkennung - KI (prompt/ai_role) ermittelt einen wahrscheinlichen Namen
+    # aus dem Text, RapidFuzz vergleicht ihn deterministisch mit den
+    # vorhandenen Kandidaten (candidates_endpoint); nur bei mehrdeutigem
+    # Ergebnis wird eine zweite KI-Abfrage (prompt_step2/ai_role_step2) mit
+    # den paar aehnlichsten Kandidaten gestellt. Schwellenwerte sind
+    # bewusst Config, nicht Code - siehe TODO_paperless_korrespondenten_pipeline.md.
+    prompt_step2: str | None = None
+    ai_role_step2: str | None = None
+    # Score (0-100) UND Abstand zum zweitbesten Treffer, ab dem ein
+    # Fuzzy-Treffer ohne zweite KI-Abfrage direkt uebernommen wird.
+    fuzzy_assign_min_score: float = 95.0
+    fuzzy_assign_min_gap: float = 8.0
+    # Score, ab dem ein mehrdeutiger Treffer (Abstand zu klein) ueberhaupt
+    # per zweiter KI-Abfrage aufgeloest wird, statt direkt als "kein
+    # Treffer" zu gelten.
+    fuzzy_review_min_score: float = 80.0
+    # Wie viele der aehnlichsten Kandidaten der zweiten KI-Abfrage
+    # hoechstens vorgelegt werden.
+    fuzzy_candidate_limit: int = 5
 
 
 def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepConfig:
@@ -66,6 +86,14 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
     that may never be removed, regardless of what the AI suggests - an
     enforced, config-level guarantee rather than relying on the prompt
     text alone.
+
+    If prompt_step2 is set, this is a two-stage correspondent-style step:
+    the primary prompt/ai_role extracts a probable name from the text,
+    RapidFuzz compares it deterministically against candidates_endpoint's
+    list, and only an ambiguous fuzzy result (see fuzzy_*_min_* thresholds)
+    triggers a second AI call (prompt_step2/ai_role_step2) with the
+    fuzzy_candidate_limit closest candidates to disambiguate. See
+    TODO_paperless_korrespondenten_pipeline.md for the full decision logic.
     """
     data = load_yaml(path)
     steps = data.get("steps", {})
@@ -101,6 +129,12 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
         docling_base_url=docling.get("base_url"),
         docling_force_ocr=docling.get("force_ocr", True),
         condition=step.get("condition"),
+        prompt_step2=step.get("prompt_step2"),
+        ai_role_step2=step.get("ai_role_step2"),
+        fuzzy_assign_min_score=step.get("fuzzy_assign_min_score", 95.0),
+        fuzzy_assign_min_gap=step.get("fuzzy_assign_min_gap", 8.0),
+        fuzzy_review_min_score=step.get("fuzzy_review_min_score", 80.0),
+        fuzzy_candidate_limit=step.get("fuzzy_candidate_limit", 5),
     )
 
     if quality_check:
@@ -119,6 +153,16 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
         raise ValueError(
             f"Schritt {name!r}: 'prompt' und 'ai_role' sind erforderlich (außer bei "
             "quality_check-Schritten)"
+        )
+
+    if config.prompt_step2 and not config.candidates_endpoint:
+        raise ValueError(
+            f"Schritt {name!r}: 'prompt_step2' (zweistufige Korrespondenten-Erkennung) "
+            "benötigt zusätzlich 'candidates_endpoint'"
+        )
+    if config.prompt_step2 and not config.ai_role_step2:
+        raise ValueError(
+            f"Schritt {name!r}: 'prompt_step2' benötigt zusätzlich 'ai_role_step2'"
         )
 
     return config

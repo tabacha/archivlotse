@@ -6,6 +6,8 @@ import re
 import sqlite3
 from typing import Callable
 
+from rapidfuzz import fuzz, process
+
 from .ai.factory import build_ai_client
 from .config import AIConfig, load_ai_config, load_paperless_config
 from .db import (
@@ -36,6 +38,15 @@ UNKNOWN_SENTINEL = "UNBEKANNT"
 # explicitly empty selection, not an error.
 NONE_SENTINEL = "KEINE"
 
+# Answer for a correspondent step (step1 or step2, see
+# config/prompts/correspondent-step*.j2 and
+# TODO_paperless_korrespondenten_pipeline.md) when no correspondent can be
+# confidently determined from the text at all - distinct from "a name was
+# extracted but doesn't match an existing Paperless correspondent", which
+# is a candidate for a NEW correspondent (never auto-created, see
+# CLAUDE.md non-goals - just logged for manual review).
+NO_CORRESPONDENT_SENTINEL = "KEINEN-GEFUNDEN"
+
 # Multi-choice prompts (e.g. config/prompts/tags.j2) answer in two labeled
 # lines, one for candidates to add and one for candidates to remove, so
 # the AI can also flag existing values that no longer fit - see
@@ -46,6 +57,7 @@ _DELETE_LINE_RE = re.compile(r"^\s*L(?:ö|oe)schen\s*:\s*(.*)$", re.IGNORECASE)
 CANDIDATE_FETCHERS: dict[str, Callable[[PaperlessClient], list[dict]]] = {
     "document_types": lambda paperless: paperless.list_document_types(),
     "tags": lambda paperless: paperless.list_tags(),
+    "correspondents": lambda paperless: paperless.list_correspondents(),
 }
 
 # How long a fetched candidate list (document types, tags, ...) is reused
@@ -194,6 +206,31 @@ def _parse_add_delete_lines(text: str) -> tuple[str, str]:
     return add_part, delete_part
 
 
+def _normalize_correspondent_name(name: str) -> str:
+    """Minimal normalization before fuzzy matching: collapse whitespace
+    and casefold only. Deliberately does NOT strip legal forms (GmbH,
+    AG, ...), location suffixes, or terms like "Lebensversicherung" vs.
+    "Versicherung" - per TODO_paperless_korrespondenten_pipeline.md, these
+    can distinguish genuinely different legal entities and must survive
+    into the fuzzy score, not be normalized away."""
+    return " ".join(name.strip().split()).casefold()
+
+
+def _fuzzy_match_correspondents(
+    extracted_name: str, candidates: list[dict], limit: int
+) -> list[tuple[int, float]]:
+    """Score `extracted_name` against every candidate's name with
+    RapidFuzz, returning the top `limit` (id, score) pairs sorted by
+    descending score. Empty if `candidates` is empty."""
+    if not candidates:
+        return []
+    choices = {candidate["id"]: _normalize_correspondent_name(candidate["name"]) for candidate in candidates}
+    results = process.extract(
+        _normalize_correspondent_name(extracted_name), choices, scorer=fuzz.WRatio, limit=limit
+    )
+    return [(candidate_id, score) for _value, score, candidate_id in results]
+
+
 def _split_candidate_names(part: str) -> list[str]:
     if not part or part.strip().casefold() == NONE_SENTINEL.casefold():
         return []
@@ -302,6 +339,13 @@ def process_step(
       at all - estimate the existing text's OCR quality, and only if it's
       below quality_threshold, re-OCR the original file via Docling Serve
       and (if the result passes a basic sanity check) write it back.
+    - Correspondent step (step has `prompt_step2` set): two-stage
+      recognition - the primary prompt/ai_role extracts a probable name
+      from the text, RapidFuzz scores it against candidates_endpoint's
+      list deterministically, and only an ambiguous fuzzy result (see
+      fuzzy_*_min_* thresholds in StepConfig) triggers a second AI call
+      (prompt_step2/ai_role_step2) with the closest few candidates to
+      disambiguate. See TODO_paperless_korrespondenten_pipeline.md.
 
     All shapes except the OCR check also support a `condition`: the step
     is skipped entirely (no AI call) unless the document's current
@@ -328,6 +372,11 @@ def process_step(
             return _process_ocr_step(step_config, paperless, conn, document_id, dry_run, force)
 
         ai_config = load_ai_config(ai_role or step_config.ai_role, ai_config_path)
+        if step_config.prompt_step2:
+            ai_config_step2 = load_ai_config(step_config.ai_role_step2, ai_config_path)
+            return _process_correspondent_step(
+                step_config, ai_config, ai_config_step2, paperless, conn, document_id, dry_run, force
+            )
         if step_config.candidates_endpoint and step_config.multi:
             return _process_multi_choice_step(
                 step_config, ai_config, paperless, conn, document_id, dry_run, force
@@ -581,6 +630,322 @@ def _process_choice_step(
             document_id,
             step_config.name,
             suggestion,
+        )
+        return None
+
+    matched_name = name_by_id[matched_id]
+    return _apply_value(
+        step_config,
+        paperless,
+        conn,
+        document_id,
+        old_value,
+        matched_name,
+        dry_run,
+        write_value=matched_id,
+    )
+
+
+def _process_correspondent_step(
+    step_config: StepConfig,
+    ai_config: AIConfig,
+    ai_config_step2: AIConfig,
+    paperless: PaperlessClient,
+    conn: sqlite3.Connection,
+    document_id: int,
+    dry_run: bool,
+    force: bool = False,
+) -> str | None:
+    """Two-stage correspondent recognition, see
+    TODO_paperless_korrespondenten_pipeline.md for the full design:
+
+    1. step1 (step_config.prompt/ai_role) extracts a probable
+       correspondent name from the text, or NO_CORRESPONDENT_SENTINEL.
+    2. RapidFuzz scores that name against every existing Paperless
+       correspondent (candidates_endpoint), deterministically, no AI
+       involved.
+    3. A confident, clearly-leading fuzzy match is assigned directly.
+       An ambiguous result (several similarly-plausible candidates)
+       triggers step2 (prompt_step2/ai_role_step2) with just the closest
+       few candidates to disambiguate using the full text. A weak match
+       is left alone.
+
+    Every non-assignment outcome (step1 found nothing, no plausible
+    fuzzy match, step2 couldn't confirm one of its candidates, step2
+    proposed a name matching none of them) is logged and returns None -
+    ArchivLotse never creates a new correspondent automatically (see
+    CLAUDE.md non-goals); that needs a human decision this step doesn't
+    make for you.
+    """
+    document = paperless.get_document(document_id)
+
+    document_type_name = _resolve_document_type_name(document, paperless, conn, force)
+    if not _condition_met(step_config, document, document_type_name):
+        logger.info(
+            "Dokument %s, Schritt %r: Bedingung %r nicht erfüllt, Schritt übersprungen",
+            document_id,
+            step_config.name,
+            step_config.condition,
+        )
+        return None
+
+    input_text = str(document.get(step_config.source_field) or "").strip()
+    candidates = _get_candidates(conn, paperless, step_config.candidates_endpoint, force)
+    name_by_id = {candidate["id"]: candidate["name"] for candidate in candidates}
+    old_id = document.get(step_config.target_field)
+    old_value = name_by_id.get(old_id, old_id)
+
+    if not input_text:
+        logger.warning(
+            "Dokument %s: Feld %r ist leer, Schritt %r übersprungen",
+            document_id,
+            step_config.source_field,
+            step_config.name,
+        )
+        return None
+
+    truncated_text = input_text[: step_config.max_input_chars]
+    postprocessing_signature = (
+        f"strip_quotes={step_config.strip_quotes};"
+        f"max_output_length={step_config.max_output_length}"
+    )
+
+    # --- step1: extract a probable correspondent name (free text) ---
+    prompt_source = load_prompt_source(step_config.prompt)
+    prompt_version = hashlib.sha256(prompt_source.encode("utf-8")).hexdigest()
+    fingerprint1 = _fingerprint(
+        truncated_text,
+        prompt_version,
+        ai_config.provider,
+        ai_config.model,
+        postprocessing_signature,
+    )
+    cache_key1 = f"{step_config.name}:step1"
+    cached1 = None if force else get_cached_step_result(conn, cache_key1, document_id, fingerprint1)
+    if cached1 is not None:
+        extracted_name = cached1["output_value"]
+        logger.info(
+            "Dokument %s, Schritt %r (step1): unveränderte Eingabe/Prompt/Modell, nutze "
+            "zwischengespeicherten Namen %r",
+            document_id,
+            step_config.name,
+            extracted_name,
+        )
+    else:
+        prompt = render_prompt(
+            step_config.prompt, input_text=truncated_text, document_type_name=document_type_name
+        )
+        ai_client = build_ai_client(ai_config)
+        logger.info(
+            "Dokument %s, Schritt %r (step1): frage wahrscheinlichen Korrespondenten bei %s/%s an",
+            document_id,
+            step_config.name,
+            ai_config.provider,
+            ai_config.model,
+        )
+        logger.debug(
+            "Dokument %s, Schritt %r (step1): vollständiger Prompt:\n%s",
+            document_id,
+            step_config.name,
+            prompt,
+        )
+        ai_result = ai_client.generate(prompt)
+        logger.debug(
+            "Dokument %s, Schritt %r (step1): rohe KI-Antwort: %r",
+            document_id,
+            step_config.name,
+            ai_result.text,
+        )
+        cost = _log_usage(document_id, f"{step_config.name}:step1", ai_config, ai_result)
+        extracted_name = _postprocess(ai_result.text, step_config)
+        save_step_result(
+            conn,
+            step_name=cache_key1,
+            document_id=document_id,
+            fingerprint=fingerprint1,
+            output_value=extracted_name,
+            provider=ai_config.provider,
+            model=ai_config.model,
+            prompt_name=step_config.prompt,
+            prompt_version=prompt_version,
+            prompt_tokens=ai_result.prompt_tokens,
+            completion_tokens=ai_result.completion_tokens,
+            estimated_cost_usd=cost,
+        )
+        logger.info(
+            "Dokument %s, Schritt %r (step1): extrahierter Name: %r",
+            document_id,
+            step_config.name,
+            extracted_name,
+        )
+
+    if extracted_name.strip().casefold() == NO_CORRESPONDENT_SENTINEL.casefold():
+        logger.info(
+            "Dokument %s, Schritt %r: step1 konnte keinen Korrespondenten ermitteln (%s), "
+            "keine automatische Zuordnung",
+            document_id,
+            step_config.name,
+            NO_CORRESPONDENT_SENTINEL,
+        )
+        return None
+
+    # --- deterministic fuzzy matching against existing correspondents ---
+    if not candidates:
+        logger.warning(
+            "Dokument %s, Schritt %r: keine vorhandenen Korrespondenten zum Abgleich - %r "
+            "bleibt unzugeordnet (manuelle Prüfung)",
+            document_id,
+            step_config.name,
+            extracted_name,
+        )
+        return None
+
+    matches = _fuzzy_match_correspondents(extracted_name, candidates, step_config.fuzzy_candidate_limit)
+    top_id, top_score = matches[0]
+    second_score = matches[1][1] if len(matches) > 1 else None
+    gap = top_score - second_score if second_score is not None else None
+    logger.info(
+        "Dokument %s, Schritt %r: Fuzzy-Match für %r -> bester Treffer %r (Score %.1f), "
+        "Abstand zum zweiten %s",
+        document_id,
+        step_config.name,
+        extracted_name,
+        name_by_id[top_id],
+        top_score,
+        f"{gap:.1f}" if gap is not None else "n/a (nur ein Kandidat)",
+    )
+
+    matched_id: int | None = None
+
+    if top_score >= step_config.fuzzy_assign_min_score and (
+        gap is None or gap >= step_config.fuzzy_assign_min_gap
+    ):
+        matched_id = top_id
+        logger.info(
+            "Dokument %s, Schritt %r: eindeutiger Treffer, keine zweite KI-Abfrage nötig",
+            document_id,
+            step_config.name,
+        )
+    elif top_score >= step_config.fuzzy_review_min_score:
+        plausible = [
+            {"id": candidate_id, "name": name_by_id[candidate_id]}
+            for candidate_id, score in matches
+            if score >= step_config.fuzzy_review_min_score
+        ]
+        logger.info(
+            "Dokument %s, Schritt %r: mehrdeutiger Fuzzy-Treffer (Score %.1f, Abstand %s), "
+            "frage step2 mit %d Kandidaten an",
+            document_id,
+            step_config.name,
+            top_score,
+            f"{gap:.1f}" if gap is not None else "n/a",
+            len(plausible),
+        )
+
+        prompt_source2 = load_prompt_source(step_config.prompt_step2)
+        prompt_version2 = hashlib.sha256(prompt_source2.encode("utf-8")).hexdigest()
+        candidates_signature2 = "|".join(sorted(candidate["name"] for candidate in plausible))
+        fingerprint2 = _fingerprint(
+            truncated_text,
+            prompt_version2,
+            ai_config_step2.provider,
+            ai_config_step2.model,
+            postprocessing_signature,
+            candidates_signature2,
+        )
+        cache_key2 = f"{step_config.name}:step2"
+        cached2 = None if force else get_cached_step_result(conn, cache_key2, document_id, fingerprint2)
+        if cached2 is not None:
+            step2_answer = cached2["output_value"]
+            logger.info(
+                "Dokument %s, Schritt %r (step2): unveränderte Eingabe/Kandidaten/Prompt/Modell, "
+                "nutze zwischengespeicherte Antwort %r",
+                document_id,
+                step_config.name,
+                step2_answer,
+            )
+        else:
+            prompt2 = render_prompt(
+                step_config.prompt_step2,
+                input_text=truncated_text,
+                correspondent_names=[candidate["name"] for candidate in plausible],
+                document_type_name=document_type_name,
+            )
+            ai_client2 = build_ai_client(ai_config_step2)
+            logger.info(
+                "Dokument %s, Schritt %r (step2): frage Disambiguierung bei %s/%s an",
+                document_id,
+                step_config.name,
+                ai_config_step2.provider,
+                ai_config_step2.model,
+            )
+            logger.debug(
+                "Dokument %s, Schritt %r (step2): vollständiger Prompt:\n%s",
+                document_id,
+                step_config.name,
+                prompt2,
+            )
+            ai_result2 = ai_client2.generate(prompt2)
+            logger.debug(
+                "Dokument %s, Schritt %r (step2): rohe KI-Antwort: %r",
+                document_id,
+                step_config.name,
+                ai_result2.text,
+            )
+            cost2 = _log_usage(document_id, f"{step_config.name}:step2", ai_config_step2, ai_result2)
+            step2_answer = _postprocess(ai_result2.text, step_config)
+            save_step_result(
+                conn,
+                step_name=cache_key2,
+                document_id=document_id,
+                fingerprint=fingerprint2,
+                output_value=step2_answer,
+                provider=ai_config_step2.provider,
+                model=ai_config_step2.model,
+                prompt_name=step_config.prompt_step2,
+                prompt_version=prompt_version2,
+                prompt_tokens=ai_result2.prompt_tokens,
+                completion_tokens=ai_result2.completion_tokens,
+                estimated_cost_usd=cost2,
+            )
+            logger.info(
+                "Dokument %s, Schritt %r (step2): Antwort: %r",
+                document_id,
+                step_config.name,
+                step2_answer,
+            )
+
+        if step2_answer.strip().casefold() == NO_CORRESPONDENT_SENTINEL.casefold():
+            logger.info(
+                "Dokument %s, Schritt %r: step2 konnte keinen der vorgeschlagenen Korrespondenten "
+                "bestätigen, keine automatische Zuordnung",
+                document_id,
+                step_config.name,
+            )
+            return None
+
+        id_by_normalized_name = {
+            candidate["name"].strip().casefold(): candidate["id"] for candidate in plausible
+        }
+        matched_id = id_by_normalized_name.get(step2_answer.strip().casefold())
+        if matched_id is None:
+            logger.info(
+                "Dokument %s, Schritt %r: step2 schlägt einen neuen Korrespondenten vor (%r), "
+                "der zu keinem vorgeschlagenen Kandidaten passt - wird NICHT automatisch "
+                "angelegt, manuelle Prüfung nötig",
+                document_id,
+                step_config.name,
+                step2_answer,
+            )
+            return None
+    else:
+        logger.info(
+            "Dokument %s, Schritt %r: kein ausreichend plausibler Treffer für %r (Score %.1f), "
+            "keine automatische Zuordnung",
+            document_id,
+            step_config.name,
+            extracted_name,
+            top_score,
         )
         return None
 

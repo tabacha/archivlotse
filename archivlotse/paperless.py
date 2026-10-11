@@ -39,6 +39,11 @@ class PaperlessClient:
         each as {"id": ..., "name": ..., ...}."""
         return self._list_all("/api/tags/")
 
+    def list_correspondents(self) -> list[dict]:
+        """Fetch all correspondents configured in Paperless, following
+        pagination, each as {"id": ..., "name": ..., ...}."""
+        return self._list_all("/api/correspondents/")
+
     def download_original(self, document_id: int) -> bytes:
         """Fetch the original (unmodified) document file."""
         response = self._client.get(f"/api/documents/{document_id}/download/")

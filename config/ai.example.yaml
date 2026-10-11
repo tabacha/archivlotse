@@ -63,3 +63,24 @@ roles:
     model: "llama-3.3-70b-instruct"
     price_per_1m_input: 0.90
     price_per_1m_output: 0.90
+
+  # Korrespondenten-Erkennung, Stufe 1 (siehe config/steps.yaml:
+  # correspondent, TODO_paperless_korrespondenten_pipeline.md): reine
+  # Extraktion eines wahrscheinlichen Namens aus dem Text - wie
+  # document_type eine einfache Klassifizierungsaufgabe, daher dasselbe
+  # guenstige Modell.
+  correspondent_step1:
+    provider: scaleway
+    model: "mistral-small-3.2-24b-instruct-2506"
+    price_per_1m_input: 0.15
+    price_per_1m_output: 0.35
+
+  # Korrespondenten-Erkennung, Stufe 2: wird NUR bei mehrdeutigen
+  # Fuzzy-Treffern aufgerufen (selten), muss dann aber tatsaechlich
+  # zwischen mehreren aehnlich klingenden Firmen/Behoerden unterscheiden -
+  # daher das staerkere Modell wie "precise".
+  correspondent_step2:
+    provider: scaleway
+    model: "llama-3.3-70b-instruct"
+    price_per_1m_input: 0.90
+    price_per_1m_output: 0.90
