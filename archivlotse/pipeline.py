@@ -358,7 +358,14 @@ def process_batch_by_tag(
 ) -> dict[int, object]:
     """Run the whole pipeline (or, if step_name is given, just that one
     step) for every Paperless document tagged `tag_name`, one after
-    another, in whatever order Paperless returns them.
+    another, smallest document id first.
+
+    Immediately before processing each document, its tags are re-checked
+    fresh against Paperless - the document list was fetched once up
+    front, but a long batch can take a while, and the tag may have been
+    removed (e.g. by someone else, or a previous document's processing)
+    in the meantime. A document that no longer has the tag is skipped,
+    not processed anyway.
 
     A document that raises is logged and skipped - one bad document
     (unexpected content, a transient network error, ...) must not stop
@@ -378,57 +385,67 @@ def process_batch_by_tag(
         if tag_id is None:
             available = ", ".join(sorted(tag["name"] for tag in tags)) or "(keine)"
             raise ValueError(f"Tag {tag_name!r} existiert nicht in Paperless. Vorhanden: {available}")
-        document_ids = [document["id"] for document in paperless.list_documents_by_tag_id(tag_id)]
+        document_ids = sorted(document["id"] for document in paperless.list_documents_by_tag_id(tag_id))
 
-    if limit is not None:
-        document_ids = document_ids[:limit]
+        if limit is not None:
+            document_ids = document_ids[:limit]
 
-    logger.info("Batch (Tag %r): %d Dokument(e) gefunden", tag_name, len(document_ids))
+        logger.info("Batch (Tag %r): %d Dokument(e) gefunden", tag_name, len(document_ids))
 
-    results: dict[int, object] = {}
-    for index, document_id in enumerate(document_ids, start=1):
-        logger.info(
-            "Batch (Tag %r): Dokument %s (%d/%d)", tag_name, document_id, index, len(document_ids)
-        )
-        try:
-            if step_name is not None:
-                results[document_id] = process_step(
-                    step_name=step_name,
-                    document_id=document_id,
-                    dry_run=dry_run,
-                    force=force,
-                    ai_role=ai_role,
-                    paperless_config_path=paperless_config_path,
-                    ai_config_path=ai_config_path,
-                    steps_config_path=steps_config_path,
-                    db_path=db_path,
-                )
-            else:
-                results[document_id] = process_pipeline(
-                    document_id=document_id,
-                    dry_run=dry_run,
-                    force=force,
-                    paperless_config_path=paperless_config_path,
-                    ai_config_path=ai_config_path,
-                    steps_config_path=steps_config_path,
-                    db_path=db_path,
-                )
-        except Exception:
-            logger.exception(
-                "Batch (Tag %r): Dokument %s fehlgeschlagen, überspringe und fahre mit dem "
-                "nächsten Dokument fort",
-                tag_name,
-                document_id,
+        results: dict[int, object] = {}
+        for index, document_id in enumerate(document_ids, start=1):
+            logger.info(
+                "Batch (Tag %r): Dokument %s (%d/%d)", tag_name, document_id, index, len(document_ids)
             )
-            results[document_id] = None
+            current_document = paperless.get_document(document_id)
+            if tag_id not in (current_document.get("tags") or []):
+                logger.info(
+                    "Batch (Tag %r): Dokument %s hat den Tag inzwischen nicht mehr - übersprungen",
+                    tag_name,
+                    document_id,
+                )
+                results[document_id] = None
+                continue
 
-    logger.info(
-        "Batch (Tag %r) abgeschlossen: %d von %d Dokument(en) verarbeitet",
-        tag_name,
-        len(results),
-        len(document_ids),
-    )
-    return results
+            try:
+                if step_name is not None:
+                    results[document_id] = process_step(
+                        step_name=step_name,
+                        document_id=document_id,
+                        dry_run=dry_run,
+                        force=force,
+                        ai_role=ai_role,
+                        paperless_config_path=paperless_config_path,
+                        ai_config_path=ai_config_path,
+                        steps_config_path=steps_config_path,
+                        db_path=db_path,
+                    )
+                else:
+                    results[document_id] = process_pipeline(
+                        document_id=document_id,
+                        dry_run=dry_run,
+                        force=force,
+                        paperless_config_path=paperless_config_path,
+                        ai_config_path=ai_config_path,
+                        steps_config_path=steps_config_path,
+                        db_path=db_path,
+                    )
+            except Exception:
+                logger.exception(
+                    "Batch (Tag %r): Dokument %s fehlgeschlagen, überspringe und fahre mit dem "
+                    "nächsten Dokument fort",
+                    tag_name,
+                    document_id,
+                )
+                results[document_id] = None
+
+        logger.info(
+            "Batch (Tag %r) abgeschlossen: %d von %d Dokument(en) verarbeitet",
+            tag_name,
+            len(results),
+            len(document_ids),
+        )
+        return results
 
 
 def process_step(

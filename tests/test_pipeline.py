@@ -26,6 +26,7 @@ class FakePaperlessClient:
         tags=None,
         correspondents=None,
         documents_by_tag=None,
+        documents_by_id=None,
         original_bytes=b"%PDF-fake%",
     ):
         self.document = {
@@ -38,12 +39,18 @@ class FakePaperlessClient:
         self.tags = tags or []
         self.correspondents = correspondents or []
         self.documents_by_tag = documents_by_tag or {}
+        # Per-ID document records (e.g. {"tags": [...]}) for batch tests
+        # with several distinct documents - falls back to self.document
+        # (the single-document fixture used by non-batch tests) for any
+        # id not listed here.
+        self.documents_by_id = documents_by_id or {}
         self.original_bytes = original_bytes
         self.download_calls = 0
         self.list_document_types_calls = 0
         self.list_tags_calls = 0
         self.list_correspondents_calls = 0
         self.list_documents_by_tag_id_calls: list[int] = []
+        self.get_document_calls: list[int] = []
 
     def __enter__(self):
         return self
@@ -52,6 +59,9 @@ class FakePaperlessClient:
         return False
 
     def get_document(self, document_id):
+        self.get_document_calls.append(document_id)
+        if document_id in self.documents_by_id:
+            return dict(self.documents_by_id[document_id])
         return dict(self.document)
 
     def update_document_field(self, document_id, field, value):
@@ -1080,9 +1090,17 @@ def _patch_batch_common(monkeypatch, fake_paperless):
     monkeypatch.setattr(pipeline_module, "PaperlessClient", lambda config: fake_paperless)
 
 
+# TODO hat id=3 in TAGS - jedes Batch-Testdokument traegt diesen Tag,
+# sofern der Test nicht explizit etwas anderes simuliert (siehe
+# test_process_batch_by_tag_skips_document_that_lost_the_tag).
+_TAGGED = {"tags": [3]}
+
+
 def test_process_batch_by_tag_runs_pipeline_per_document_in_order(monkeypatch, tmp_path):
     fake_paperless = FakePaperlessClient(
-        tags=TAGS, documents_by_tag={3: [{"id": 10}, {"id": 20}, {"id": 30}]}
+        tags=TAGS,
+        documents_by_tag={3: [{"id": 10}, {"id": 20}, {"id": 30}]},
+        documents_by_id={10: _TAGGED, 20: _TAGGED, 30: _TAGGED},
     )
     _patch_batch_common(monkeypatch, fake_paperless)
 
@@ -1103,8 +1121,57 @@ def test_process_batch_by_tag_runs_pipeline_per_document_in_order(monkeypatch, t
     assert results == {10: {"title": "ok:10"}, 20: {"title": "ok:20"}, 30: {"title": "ok:30"}}
 
 
+def test_process_batch_by_tag_processes_smallest_id_first(monkeypatch, tmp_path):
+    # Paperless liefert die Dokumente absichtlich NICHT in ID-Reihenfolge -
+    # die Batch-Funktion muss trotzdem aufsteigend verarbeiten.
+    fake_paperless = FakePaperlessClient(
+        tags=TAGS,
+        documents_by_tag={3: [{"id": 30}, {"id": 10}, {"id": 20}]},
+        documents_by_id={10: _TAGGED, 20: _TAGGED, 30: _TAGGED},
+    )
+    _patch_batch_common(monkeypatch, fake_paperless)
+
+    call_order = []
+    monkeypatch.setattr(
+        pipeline_module,
+        "process_pipeline",
+        lambda document_id, **kwargs: call_order.append(document_id),
+    )
+
+    pipeline_module.process_batch_by_tag(tag_name="TODO", db_path=str(tmp_path / "test.db"))
+
+    assert call_order == [10, 20, 30]
+
+
+def test_process_batch_by_tag_skips_document_that_lost_the_tag(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(
+        tags=TAGS,
+        documents_by_tag={3: [{"id": 10}, {"id": 20}, {"id": 30}]},
+        # Dokument 20 trug den Tag beim ersten Abruf, hat ihn inzwischen
+        # aber nicht mehr (z.B. von Hand entfernt, waehrend der Batch lief).
+        documents_by_id={10: _TAGGED, 20: {"tags": []}, 30: _TAGGED},
+    )
+    _patch_batch_common(monkeypatch, fake_paperless)
+
+    call_order = []
+    monkeypatch.setattr(
+        pipeline_module,
+        "process_pipeline",
+        lambda document_id, **kwargs: call_order.append(document_id) or {"title": f"ok:{document_id}"},
+    )
+
+    results = pipeline_module.process_batch_by_tag(tag_name="TODO", db_path=str(tmp_path / "test.db"))
+
+    # Dokument 20 wird NICHT prozessiert, obwohl es in der urspruenglichen
+    # Trefferliste war - der frische Tag-Check direkt davor hat es erkannt.
+    assert call_order == [10, 30]
+    assert results == {10: {"title": "ok:10"}, 20: None, 30: {"title": "ok:30"}}
+
+
 def test_process_batch_by_tag_uses_single_step_when_given(monkeypatch, tmp_path):
-    fake_paperless = FakePaperlessClient(tags=TAGS, documents_by_tag={3: [{"id": 10}]})
+    fake_paperless = FakePaperlessClient(
+        tags=TAGS, documents_by_tag={3: [{"id": 10}]}, documents_by_id={10: _TAGGED}
+    )
     _patch_batch_common(monkeypatch, fake_paperless)
 
     captured = {}
@@ -1126,7 +1193,9 @@ def test_process_batch_by_tag_uses_single_step_when_given(monkeypatch, tmp_path)
 
 def test_process_batch_by_tag_continues_after_one_document_fails(monkeypatch, tmp_path):
     fake_paperless = FakePaperlessClient(
-        tags=TAGS, documents_by_tag={3: [{"id": 10}, {"id": 20}, {"id": 30}]}
+        tags=TAGS,
+        documents_by_tag={3: [{"id": 10}, {"id": 20}, {"id": 30}]},
+        documents_by_id={10: _TAGGED, 20: _TAGGED, 30: _TAGGED},
     )
     _patch_batch_common(monkeypatch, fake_paperless)
 
@@ -1150,7 +1219,9 @@ def test_process_batch_by_tag_continues_after_one_document_fails(monkeypatch, tm
 
 def test_process_batch_by_tag_respects_limit(monkeypatch, tmp_path):
     fake_paperless = FakePaperlessClient(
-        tags=TAGS, documents_by_tag={3: [{"id": 10}, {"id": 20}, {"id": 30}]}
+        tags=TAGS,
+        documents_by_tag={3: [{"id": 10}, {"id": 20}, {"id": 30}]},
+        documents_by_id={10: _TAGGED, 20: _TAGGED, 30: _TAGGED},
     )
     _patch_batch_common(monkeypatch, fake_paperless)
 
