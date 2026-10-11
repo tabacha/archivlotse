@@ -4,7 +4,7 @@ import argparse
 import sys
 
 from .logging_config import setup_logging
-from .pipeline import process_pipeline, process_step
+from .pipeline import clear_cache, process_pipeline, process_step
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -28,6 +28,12 @@ def main(argv: list[str] | None = None) -> int:
         "--dry-run", action="store_true", help="Nur berechnen, nicht in Paperless schreiben"
     )
     process_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Zwischengespeicherte Ergebnisse (KI-Antworten, Kandidatenlisten) ignorieren und "
+        "alles neu berechnen, auch wenn sich Eingabe/Kandidaten nicht geändert haben",
+    )
+    process_parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -45,6 +51,16 @@ def main(argv: list[str] | None = None) -> int:
     process_parser.add_argument("--steps-config", default="config/steps.yaml")
     process_parser.add_argument("--db", default="data/archivlotse.db")
 
+    clear_cache_parser = subparsers.add_parser(
+        "clear-cache",
+        help="Zwischengespeicherte KI-Ergebnisse und Kandidatenlisten komplett löschen "
+        "(Audit-Log bleibt erhalten)",
+    )
+    clear_cache_parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Ausführliches Logging"
+    )
+    clear_cache_parser.add_argument("--db", default="data/archivlotse.db")
+
     args = parser.parse_args(argv)
 
     if args.command is None:
@@ -53,13 +69,16 @@ def main(argv: list[str] | None = None) -> int:
 
     setup_logging(verbose=getattr(args, "verbose", False))
 
-    if args.command == "process":
+    if args.command == "clear-cache":
+        clear_cache(db_path=args.db)
+    elif args.command == "process":
         if args.step is None:
             if args.ai_role is not None:
                 parser.error("--ai-role kann nur zusammen mit --step benutzt werden")
             process_pipeline(
                 document_id=args.document_id,
                 dry_run=args.dry_run,
+                force=args.force,
                 paperless_config_path=args.paperless_config,
                 ai_config_path=args.ai_config,
                 steps_config_path=args.steps_config,
@@ -70,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
                 step_name=args.step,
                 document_id=args.document_id,
                 dry_run=args.dry_run,
+                force=args.force,
                 ai_role=args.ai_role,
                 paperless_config_path=args.paperless_config,
                 ai_config_path=args.ai_config,

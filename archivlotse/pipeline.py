@@ -10,6 +10,7 @@ from .ai.factory import build_ai_client
 from .config import AIConfig, load_ai_config, load_paperless_config
 from .db import (
     append_audit_log,
+    clear_caches,
     get_cached_candidates,
     get_cached_step_result,
     init_db,
@@ -67,11 +68,14 @@ def _fingerprint(*parts: str) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _get_candidates(conn: sqlite3.Connection, paperless: PaperlessClient, endpoint: str) -> list[dict]:
+def _get_candidates(
+    conn: sqlite3.Connection, paperless: PaperlessClient, endpoint: str, force: bool = False
+) -> list[dict]:
     """Fetch a candidate list (e.g. Paperless tags/document types) for
     `endpoint`, reusing a cached copy (see CANDIDATE_CACHE_TTL_SECONDS) if
-    one is still fresh enough instead of hitting Paperless again."""
-    cached = get_cached_candidates(conn, endpoint, CANDIDATE_CACHE_TTL_SECONDS)
+    one is still fresh enough instead of hitting Paperless again - unless
+    force=True, which always fetches fresh (and refreshes the cache)."""
+    cached = None if force else get_cached_candidates(conn, endpoint, CANDIDATE_CACHE_TTL_SECONDS)
     if cached is not None:
         return cached
     try:
@@ -87,7 +91,7 @@ def _get_candidates(conn: sqlite3.Connection, paperless: PaperlessClient, endpoi
 
 
 def _resolve_document_type_name(
-    document: dict, paperless: PaperlessClient, conn: sqlite3.Connection
+    document: dict, paperless: PaperlessClient, conn: sqlite3.Connection, force: bool = False
 ) -> str | None:
     """Resolve the document's current document_type ID to its name, so
     it can be used in step conditions and exposed to prompt templates as
@@ -95,7 +99,7 @@ def _resolve_document_type_name(
     type_id = document.get("document_type")
     if type_id is None:
         return None
-    for candidate in _get_candidates(conn, paperless, "document_types"):
+    for candidate in _get_candidates(conn, paperless, "document_types", force):
         if candidate["id"] == type_id:
             return candidate["name"]
     return None
@@ -196,9 +200,25 @@ def _split_candidate_names(part: str) -> list[str]:
     return [piece.strip() for piece in part.split(",") if piece.strip()]
 
 
+def clear_cache(db_path: str = "data/archivlotse.db") -> None:
+    """Delete all cached step results and candidate lists (step_results,
+    candidate_cache) - NOT the audit log, which stays as permanent
+    history. Useful after reorganizing Paperless metadata (e.g. renamed/
+    restructured tags) so stale cached suggestions don't linger."""
+    conn = init_db(db_path)
+    step_results_count, candidate_cache_count = clear_caches(conn)
+    logger.info(
+        "Cache geleert: %d Ergebnis(se) aus step_results, %d Kandidatenliste(n) aus "
+        "candidate_cache entfernt",
+        step_results_count,
+        candidate_cache_count,
+    )
+
+
 def process_pipeline(
     document_id: int,
     dry_run: bool = False,
+    force: bool = False,
     paperless_config_path: str = "config/paperless.yaml",
     ai_config_path: str = "config/ai.yaml",
     steps_config_path: str = "config/steps.yaml",
@@ -215,6 +235,10 @@ def process_pipeline(
     A step that raises is logged and skipped rather than aborting the
     rest of the pipeline, so e.g. an unreachable Docling instance for
     ocr_check doesn't block document_type/title from still running.
+
+    force=True ignores any cached step_results/candidate_cache entry, so
+    every AI/Docling call and every candidate-list fetch happens again,
+    even for an unchanged document.
     """
     order = load_pipeline_order(steps_config_path)
     results: dict[str, str | None] = {}
@@ -225,6 +249,7 @@ def process_pipeline(
                 step_name=step_name,
                 document_id=document_id,
                 dry_run=dry_run,
+                force=force,
                 paperless_config_path=paperless_config_path,
                 ai_config_path=ai_config_path,
                 steps_config_path=steps_config_path,
@@ -245,6 +270,7 @@ def process_step(
     step_name: str,
     document_id: int,
     dry_run: bool = False,
+    force: bool = False,
     ai_role: str | None = None,
     paperless_config_path: str = "config/paperless.yaml",
     ai_config_path: str = "config/ai.yaml",
@@ -288,6 +314,10 @@ def process_step(
     ever gets a row when a field is actually written to Paperless (never
     on cache hits, no-ops, rejected suggestions, skipped conditions, or
     --dry-run).
+
+    force=True ignores any cached step_results/candidate_cache entry for
+    this step, so the AI/Docling call and candidate-list fetch happen
+    again even if the input hasn't changed since the last run.
     """
     step_config = load_step_config(step_name, steps_config_path)
     paperless_config = load_paperless_config(paperless_config_path)
@@ -295,16 +325,18 @@ def process_step(
 
     with PaperlessClient(paperless_config) as paperless:
         if step_config.quality_check:
-            return _process_ocr_step(step_config, paperless, conn, document_id, dry_run)
+            return _process_ocr_step(step_config, paperless, conn, document_id, dry_run, force)
 
         ai_config = load_ai_config(ai_role or step_config.ai_role, ai_config_path)
         if step_config.candidates_endpoint and step_config.multi:
             return _process_multi_choice_step(
-                step_config, ai_config, paperless, conn, document_id, dry_run
+                step_config, ai_config, paperless, conn, document_id, dry_run, force
             )
         if step_config.candidates_endpoint:
-            return _process_choice_step(step_config, ai_config, paperless, conn, document_id, dry_run)
-        return _process_text_step(step_config, ai_config, paperless, conn, document_id, dry_run)
+            return _process_choice_step(
+                step_config, ai_config, paperless, conn, document_id, dry_run, force
+            )
+        return _process_text_step(step_config, ai_config, paperless, conn, document_id, dry_run, force)
 
 
 def _process_text_step(
@@ -314,10 +346,11 @@ def _process_text_step(
     conn: sqlite3.Connection,
     document_id: int,
     dry_run: bool,
+    force: bool = False,
 ) -> str | None:
     document = paperless.get_document(document_id)
 
-    document_type_name = _resolve_document_type_name(document, paperless, conn)
+    document_type_name = _resolve_document_type_name(document, paperless, conn, force)
     if not _condition_met(step_config, document, document_type_name):
         logger.info(
             "Dokument %s, Schritt %r: Bedingung %r nicht erfüllt, Schritt übersprungen",
@@ -355,7 +388,7 @@ def _process_text_step(
         document_type_name or "",
     )
 
-    cached = get_cached_step_result(conn, step_config.name, document_id, fingerprint)
+    cached = None if force else get_cached_step_result(conn, step_config.name, document_id, fingerprint)
     if cached is not None:
         value = cached["output_value"]
         logger.info(
@@ -417,10 +450,11 @@ def _process_choice_step(
     conn: sqlite3.Connection,
     document_id: int,
     dry_run: bool,
+    force: bool = False,
 ) -> str | None:
     document = paperless.get_document(document_id)
 
-    candidates = _get_candidates(conn, paperless, step_config.candidates_endpoint)
+    candidates = _get_candidates(conn, paperless, step_config.candidates_endpoint, force)
     name_by_id = {candidate["id"]: candidate["name"] for candidate in candidates}
     id_by_normalized_name = {
         candidate["name"].strip().casefold(): candidate["id"] for candidate in candidates
@@ -431,7 +465,7 @@ def _process_choice_step(
     if step_config.candidates_endpoint == "document_types":
         document_type_name = name_by_id.get(document.get("document_type"))
     else:
-        document_type_name = _resolve_document_type_name(document, paperless, conn)
+        document_type_name = _resolve_document_type_name(document, paperless, conn, force)
 
     if not _condition_met(step_config, document, document_type_name):
         logger.info(
@@ -472,7 +506,7 @@ def _process_choice_step(
         candidates_signature,
     )
 
-    cached = get_cached_step_result(conn, step_config.name, document_id, fingerprint)
+    cached = None if force else get_cached_step_result(conn, step_config.name, document_id, fingerprint)
     if cached is not None:
         suggestion = cached["output_value"]
         logger.info(
@@ -616,6 +650,7 @@ def _process_ocr_step(
     conn: sqlite3.Connection,
     document_id: int,
     dry_run: bool,
+    force: bool = False,
 ) -> str | None:
     """OCR quality check/improve step. No AI role or prompt is used.
 
@@ -678,7 +713,7 @@ def _process_ocr_step(
     fingerprint = _fingerprint(
         old_text, step_config.docling_base_url or "", str(step_config.docling_force_ocr)
     )
-    cached = get_cached_step_result(conn, step_config.name, document_id, fingerprint)
+    cached = None if force else get_cached_step_result(conn, step_config.name, document_id, fingerprint)
     if cached is not None:
         new_text = cached["output_value"]
         logger.info(
@@ -753,6 +788,7 @@ def _process_multi_choice_step(
     conn: sqlite3.Connection,
     document_id: int,
     dry_run: bool,
+    force: bool = False,
 ) -> str | None:
     """Like _process_choice_step, but for fields that hold a LIST of
     candidate ids (e.g. Paperless tags, a many-to-many relation) rather
@@ -768,13 +804,13 @@ def _process_multi_choice_step(
     suggests - an enforced guarantee, independent of the prompt text."""
     document = paperless.get_document(document_id)
 
-    candidates = _get_candidates(conn, paperless, step_config.candidates_endpoint)
+    candidates = _get_candidates(conn, paperless, step_config.candidates_endpoint, force)
     name_by_id = {candidate["id"]: candidate["name"] for candidate in candidates}
     id_by_normalized_name = {
         candidate["name"].strip().casefold(): candidate["id"] for candidate in candidates
     }
 
-    document_type_name = _resolve_document_type_name(document, paperless, conn)
+    document_type_name = _resolve_document_type_name(document, paperless, conn, force)
     if not _condition_met(step_config, document, document_type_name):
         logger.info(
             "Dokument %s, Schritt %r: Bedingung %r nicht erfüllt, Schritt übersprungen",
@@ -819,7 +855,7 @@ def _process_multi_choice_step(
         current_tags_signature,
     )
 
-    cached = get_cached_step_result(conn, step_config.name, document_id, fingerprint)
+    cached = None if force else get_cached_step_result(conn, step_config.name, document_id, fingerprint)
     if cached is not None:
         suggestion = cached["output_value"]
         logger.info(

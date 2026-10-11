@@ -120,6 +120,42 @@ def test_process_step_is_idempotent_and_audits_only_on_change(monkeypatch, tmp_p
     assert result_rows[0]["model"] == "m"
 
 
+def test_process_step_force_bypasses_cache(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient()
+    fake_ai = FakeAIClient()
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_paperless_config",
+        lambda path: PaperlessConfig(url="http://paperless.example", token="t"),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_ai_config",
+        lambda role, path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
+    )
+    monkeypatch.setattr(pipeline_module, "load_step_config", lambda name, path: FAKE_STEP_CONFIG)
+    monkeypatch.setattr(pipeline_module, "PaperlessClient", lambda config: fake_paperless)
+    monkeypatch.setattr(pipeline_module, "build_ai_client", lambda config: fake_ai)
+
+    db_path = str(tmp_path / "test.db")
+
+    pipeline_module.process_step(step_name="title", document_id=1, db_path=db_path)
+    assert fake_ai.calls == 1
+
+    # Unveraenderte Eingabe, aber --force -> trotzdem ein neuer KI-Aufruf,
+    # kein Cache-Hit.
+    pipeline_module.process_step(step_name="title", document_id=1, force=True, db_path=db_path)
+    assert fake_ai.calls == 2
+
+    conn = pipeline_module.init_db(db_path)
+    # Beide Laeufe landen als eigene Zeilen in step_results (gleicher
+    # Fingerprint, da force keine neue Eingabe simuliert, nur den Cache
+    # umgeht - INSERT OR ... gibt es hier nicht, UNIQUE-Konflikt waere ein
+    # Bug, pruefen wir also implizit mit).
+    assert len(conn.execute("SELECT * FROM step_results").fetchall()) == 1
+
+
 def test_process_step_recomputes_when_input_changes(monkeypatch, tmp_path):
     fake_paperless = FakePaperlessClient()
     fake_ai = FakeAIClient(title="Titel A")
@@ -566,6 +602,19 @@ def test_candidate_lists_are_cached_across_calls(monkeypatch, tmp_path):
     # Zwei komplette Prozessdurchlaeufe, aber die Tag-Liste wird nur einmal
     # tatsaechlich von Paperless geholt (Cache greift beim zweiten Mal).
     assert fake_paperless.list_tags_calls == 1
+
+
+def test_force_bypasses_candidate_cache_too(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(tags=TAGS)
+    fake_ai = FakeAIClient(title="Auto")
+    _patch_multi_choice_common(monkeypatch, fake_paperless, fake_ai)
+
+    db_path = str(tmp_path / "test.db")
+    pipeline_module.process_step(step_name="tags", document_id=1, force=True, db_path=db_path)
+    pipeline_module.process_step(step_name="tags", document_id=1, force=True, db_path=db_path)
+
+    # --force holt die Tag-Liste bei jedem Lauf neu, nicht nur beim ersten.
+    assert fake_paperless.list_tags_calls == 2
 
 
 def test_multi_choice_step_adds_and_deletes_in_one_answer(monkeypatch, tmp_path):

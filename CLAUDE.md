@@ -32,10 +32,14 @@ archivlotse process 6023 --step title --dry-run
 archivlotse process 6023 --step title
 archivlotse process 6023 --step title --ai-role precise  # override the role from config/steps.yaml
 archivlotse process 6023 --step document_type --dry-run --verbose  # also logs the full prompt + raw AI answer at DEBUG
+archivlotse process 6023 --step title --force  # bypass step/candidate caches, recompute even if input unchanged
 
 # Run the whole pipeline (config/steps.yaml: pipeline:) for one document
 archivlotse process 6023 --dry-run
 archivlotse process 6023
+
+# Wipe all cached step results + candidate lists (NOT the audit log)
+archivlotse clear-cache
 ```
 
 End users who don't want a dev install can still run the same thing as `python -m archivlotse.cli process ...` from the repo root without `pip install -e .` (only the runtime deps need to be present). See `README.md` for the beginner-oriented setup walkthrough (venv, config, troubleshooting) — keep that in sync with CLI/config changes made here.
@@ -62,6 +66,8 @@ Processing (`process_step` in `archivlotse/pipeline.py`) dispatches on `step_con
 - **Audit log:** the separate `audit_log` SQLite table (`document_id`, `field_name`, `old_value`, `new_value`, `changed_at`) only ever gets a row when a field is actually written to Paperless — never on cache hits, no-op, rejected choice suggestions, skipped conditions, a "good enough" OCR check, or `--dry-run`.
 - **Cost tracking:** `archivlotse/ai/base.py: AIResult(text, prompt_tokens, completion_tokens)` is what both `OllamaClient.generate()` (from Ollama's `prompt_eval_count`/`eval_count`) and `OpenAICompatibleClient.generate()` (from the OpenAI-style `usage.prompt_tokens`/`usage.completion_tokens`) return now, instead of a bare string. `_estimate_cost(ai_config, prompt_tokens, completion_tokens)` returns `0.0` unconditionally for `provider == "ollama"` (local = free), `None` if usage data or `AIConfig.price_per_1m_input`/`price_per_1m_output` (from the role in `config/ai.yaml`) aren't available, else the computed USD estimate. `_log_usage()` logs it and every non-OCR step passes it to `save_step_result(..., prompt_tokens=, completion_tokens=, estimated_cost_usd=)`, persisted in `step_results` (migrated in place for older DBs via `_migrate_step_results_usage_columns`). Not implemented: aggregating/reporting total cost (e.g. per document or per month) — only per-call, queryable via `SELECT SUM(estimated_cost_usd) FROM step_results`.
 - `--dry-run` runs the full step (including any AI/Docling call and `step_results` caching) but skips the Paperless `PATCH` and the audit log entry.
+- `--force` (threaded through `process_pipeline`/`process_step` into each `_process_*_step` function) makes every cache lookup (`get_cached_step_result`, `_get_candidates`) a guaranteed miss, forcing a fresh AI/Docling/Paperless call even if the fingerprint is unchanged. It deliberately does **not** bypass business-rule skips (a step's `condition:`, or the OCR step's quality-threshold gate) — those aren't caching. `save_step_result` is an upsert (`INSERT ... ON CONFLICT ... DO UPDATE`) specifically so a `--force` recompute with an unchanged fingerprint overwrites the existing row instead of violating the `UNIQUE (step_name, document_id, fingerprint)` constraint.
+- `archivlotse clear-cache` (`archivlotse/db.py: clear_caches`) empties `step_results` and `candidate_cache` entirely, in one shot (no per-step/per-document granularity) — for when Paperless metadata (e.g. tags) was reorganized and stale cached suggestions shouldn't linger until their TTL/fingerprint naturally expires. Never touches `audit_log`.
 
 `process_pipeline` (new) loads `pipeline:` via `load_pipeline_order` and calls `process_step` for each name in order, catching and logging (not re-raising) any exception per step so e.g. an unreachable Docling doesn't block `document_type`/`title`. Each step still does its own fresh `paperless.get_document()`, so a later step sees an earlier step's actual Paperless write — except in `--dry-run`, where nothing is written, so later steps keep seeing pre-pipeline state (documented caveat, not a bug).
 

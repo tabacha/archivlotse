@@ -414,6 +414,40 @@ Ergebnis aus der letzten Berechnung.
 Mit `--ai-role <name>` kannst du eine andere Rolle aus `config/ai.yaml`
 für diesen Lauf benutzen, z. B. `archivlotse process 6023 --step title --ai-role precise`.
 
+### Erneut berechnen trotz Cache (`--force`)
+
+Manchmal willst du ein Ergebnis absichtlich neu berechnen lassen, obwohl
+sich am Eingabetext nichts geändert hat – z. B. weil du einen Prompt nur
+kosmetisch angepasst hast (was die Zwischenspeicherung nicht als
+"geändert" erkennt) oder einfach prüfen willst, ob die KI heute anders
+antwortet. `--force` ignoriert dafür **alle** Zwischenspeicher (KI-Ergebnisse
+und Kandidatenlisten) und löst auch dann eine neue KI-Anfrage aus, wenn
+eine gecachte Antwort vorläge:
+
+```bash
+archivlotse process 6023 --step title --force
+archivlotse process 6023 --force  # ganze Pipeline
+```
+
+`--force` überschreibt **nicht** eigentliche Business-Regeln wie die
+`condition:` eines Schritts oder die OCR-Qualitätsschwelle – die
+entscheiden weiterhin ganz normal, ob ein Schritt überhaupt etwas tut.
+
+### Zwischenspeicher komplett leeren (`clear-cache`)
+
+Hast du z. B. deine Paperless-Tags umstrukturiert und möchtest, dass
+ArchivLotse beim nächsten Lauf garantiert mit frischen Kandidatenlisten
+und ohne alte KI-Ergebnisse arbeitet, kannst du statt `--force` pro
+Dokument einmalig den kompletten Cache leeren:
+
+```bash
+archivlotse clear-cache
+```
+
+Das leert `step_results` und `candidate_cache` vollständig. Das `audit_log`
+(die dauerhafte Historie tatsächlicher Paperless-Änderungen) bleibt
+unangetastet.
+
 ## 6. Wo landen die Daten?
 
 Beim ersten Lauf legt ArchivLotse automatisch eine Datei

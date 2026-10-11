@@ -109,6 +109,11 @@ def save_step_result(
     completion_tokens: int | None = None,
     estimated_cost_usd: float | None = None,
 ) -> None:
+    """Upsert (not plain INSERT): with --force, a step can recompute for
+    an unchanged input, i.e. the SAME fingerprint as an existing cached
+    row - that must overwrite the row (refreshed token usage/cost etc.),
+    not violate the (step_name, document_id, fingerprint) UNIQUE
+    constraint."""
     conn.execute(
         """
         INSERT INTO step_results
@@ -116,6 +121,16 @@ def save_step_result(
              prompt_name, prompt_version, prompt_tokens, completion_tokens,
              estimated_cost_usd, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(step_name, document_id, fingerprint) DO UPDATE SET
+            output_value = excluded.output_value,
+            provider = excluded.provider,
+            model = excluded.model,
+            prompt_name = excluded.prompt_name,
+            prompt_version = excluded.prompt_version,
+            prompt_tokens = excluded.prompt_tokens,
+            completion_tokens = excluded.completion_tokens,
+            estimated_cost_usd = excluded.estimated_cost_usd,
+            created_at = excluded.created_at
         """,
         (
             step_name,
@@ -152,6 +167,21 @@ def get_cached_candidates(
     if age > max_age_seconds:
         return None
     return json.loads(row["data"])
+
+
+def clear_caches(conn: sqlite3.Connection) -> tuple[int, int]:
+    """Delete all cached step results and candidate lists - everything
+    that exists purely to avoid redundant AI/Docling/Paperless calls, NOT
+    the audit_log (a permanent history, not a cache). Useful after
+    reorganizing Paperless metadata (e.g. renaming/restructuring tags) so
+    stale cached suggestions don't linger. Returns (step_results_deleted,
+    candidate_cache_deleted)."""
+    step_results_count = conn.execute("SELECT COUNT(*) FROM step_results").fetchone()[0]
+    candidate_cache_count = conn.execute("SELECT COUNT(*) FROM candidate_cache").fetchone()[0]
+    conn.execute("DELETE FROM step_results")
+    conn.execute("DELETE FROM candidate_cache")
+    conn.commit()
+    return step_results_count, candidate_cache_count
 
 
 def save_candidates(conn: sqlite3.Connection, endpoint: str, candidates: list[dict]) -> None:
