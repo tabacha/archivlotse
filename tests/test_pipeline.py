@@ -517,16 +517,36 @@ def test_multi_choice_step_keeps_existing_tags_when_none_match(monkeypatch, tmp_
 
 
 def test_multi_choice_step_is_idempotent(monkeypatch, tmp_path):
+    # --dry-run, damit sich die "aktuell gesetzten Tags" zwischen den
+    # Laeufen nicht aendern (die gehoeren zum Fingerprint, siehe
+    # test_multi_choice_step_recomputes_when_current_tags_change).
     fake_paperless = FakePaperlessClient(tags=TAGS)
     fake_ai = FakeAIClient(title="Auto")
     _patch_multi_choice_common(monkeypatch, fake_paperless, fake_ai)
 
     db_path = str(tmp_path / "test.db")
-    pipeline_module.process_step(step_name="tags", document_id=1, db_path=db_path)
+    pipeline_module.process_step(step_name="tags", document_id=1, dry_run=True, db_path=db_path)
     assert fake_ai.calls == 1
 
-    pipeline_module.process_step(step_name="tags", document_id=1, db_path=db_path)
+    pipeline_module.process_step(step_name="tags", document_id=1, dry_run=True, db_path=db_path)
     assert fake_ai.calls == 1  # zweiter Lauf nutzt den Cache
+
+
+def test_multi_choice_step_recomputes_when_current_tags_change(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(tags=TAGS)
+    fake_ai = FakeAIClient(title="Hinzufügen: Auto\nLöschen: KEINE")
+    _patch_multi_choice_common(monkeypatch, fake_paperless, fake_ai)
+
+    db_path = str(tmp_path / "test.db")
+    pipeline_module.process_step(step_name="tags", document_id=1, db_path=db_path)
+    assert fake_ai.calls == 1
+    assert fake_paperless.document["tags"] == [1]  # "Auto" tatsaechlich gesetzt
+
+    # Die aktuellen Tags haben sich durch den ersten Lauf geaendert (sind
+    # Teil des Prompts/Fingerprints) -> neuer KI-Aufruf ist korrekt, kein
+    # Cache-Hit.
+    pipeline_module.process_step(step_name="tags", document_id=1, db_path=db_path)
+    assert fake_ai.calls == 2
 
 
 def test_candidate_lists_are_cached_across_calls(monkeypatch, tmp_path):
@@ -541,3 +561,49 @@ def test_candidate_lists_are_cached_across_calls(monkeypatch, tmp_path):
     # Zwei komplette Prozessdurchlaeufe, aber die Tag-Liste wird nur einmal
     # tatsaechlich von Paperless geholt (Cache greift beim zweiten Mal).
     assert fake_paperless.list_tags_calls == 1
+
+
+def test_multi_choice_step_adds_and_deletes_in_one_answer(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(tags=TAGS)
+    fake_paperless.document["tags"] = [2, 3]  # "Rechnung", "TODO"
+    fake_ai = FakeAIClient(title="Hinzufügen: Auto\nLöschen: Rechnung")
+    _patch_multi_choice_common(monkeypatch, fake_paperless, fake_ai)
+
+    pipeline_module.process_step(step_name="tags", document_id=1, db_path=str(tmp_path / "test.db"))
+
+    # Rechnung entfernt, Auto hinzugefuegt, TODO unveraendert erhalten.
+    assert fake_paperless.update_calls == [("tags", [1, 3])]
+
+
+def test_multi_choice_step_delete_wins_on_add_delete_conflict(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(tags=TAGS)
+    fake_paperless.document["tags"] = [3]  # "TODO"
+    fake_ai = FakeAIClient(title="Hinzufügen: Auto\nLöschen: Auto")
+    _patch_multi_choice_common(monkeypatch, fake_paperless, fake_ai)
+
+    pipeline_module.process_step(step_name="tags", document_id=1, db_path=str(tmp_path / "test.db"))
+
+    # "Auto" steht in beiden Listen -> wird nicht gesetzt (Loeschen gewinnt),
+    # bestehendes "TODO" bleibt unveraendert -> insgesamt keine Aenderung.
+    assert fake_paperless.update_calls == []
+
+
+def test_multi_choice_step_passes_current_tags_to_prompt(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(tags=TAGS)
+    fake_paperless.document["tags"] = [3]  # "TODO"
+    fake_ai = FakeAIClient(title="KEINE")
+    _patch_multi_choice_common(monkeypatch, fake_paperless, fake_ai)
+
+    captured = {}
+    original_render = pipeline_module.render_prompt
+
+    def capturing_render(name, **kwargs):
+        captured.update(kwargs)
+        return original_render(name, **kwargs)
+
+    monkeypatch.setattr(pipeline_module, "render_prompt", capturing_render)
+
+    pipeline_module.process_step(step_name="tags", document_id=1, db_path=str(tmp_path / "test.db"))
+
+    assert captured["current_tag_names"] == ["TODO"]
+    assert captured["candidate_names"] == ["Auto", "Rechnung", "TODO"]

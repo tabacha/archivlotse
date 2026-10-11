@@ -5,18 +5,38 @@ aufgeführten Liste bereits vorhandener Tags aus. Ein Dokument kann null,
 einen oder mehrere Tags haben.
 
 Regeln:
-- Antworte NUR mit einer durch Komma getrennten Liste der exakten Namen
-  passender Tags aus der Liste unten, ohne Anführungszeichen, ohne
-  Erklärung, ohne Zeilenumbruch (z. B. "Auto, Rechnung").
+- Antworte NUR in zwei Zeilen:
+- Erste Zeile der Zeichenkette "Hinzufügen: " und einer durch Komma getrennten Liste der exakten Namen
+passender Tags aus der Liste unten, ohne Anführungszeichen, ohne
+Erklärung, ohne Zeilenumbruch (z. B. "Auto, Rechnung").
+- Zweite Zeile: Zeichenkette "Löschen: " und einer durch Komma getrennten Liste der exakten Namen
+nicht passender Tags aus der Liste unten, ohne Anführungszeichen, ohne Erklärung, ohne Zeilenumbruch (z. B. "Auto,
+Rechnung").
 - Erfinde KEINE neuen Tags und verändere die Schreibweise nicht.
 - Wähle nur Tags, die inhaltlich klar zum Dokument passen - im Zweifel
-  lieber weniger Tags als zu viele.
+lieber weniger Tags als zu viele.
 - Wenn kein vorhandener Tag eindeutig passt, antworte exakt mit: KEINE
+
+Momentan gesetzte Tags:
+{% for name in current_tag_names %}
+- {{ name }}
+{% endfor %}
+
 
 Vorhandene Tags:
 {% for name in candidate_names %}
 - {{ name }}
 {% endfor %}
+
+Bitte beachte folgende Besonderheiten bei bestimmten Tags:
+
+- Hansi Muster, heißt eigentlich Hans Muster, Hansi ist sein Spitzname
+Die Tags
+- Haus5 ist das Haus Musterstraße 5
+
+das bitte nur setzen wenn es um etwas geht was in dem Haus passiert ist
+z.B. Handwerkerdienstleistung. Nicht wenn es nur an die Anschrift ging.
+
 
 Erkannter Text (OCR):
 ---

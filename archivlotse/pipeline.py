@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import sqlite3
 from typing import Callable
 
@@ -30,8 +31,16 @@ logger = logging.getLogger(__name__)
 UNKNOWN_SENTINEL = "UNBEKANNT"
 
 # Answer for a multi-choice step (e.g. tags) when none of the offered
-# candidates applies - an explicitly empty selection, not an error.
+# candidates applies (for either the add or the delete list) - an
+# explicitly empty selection, not an error.
 NONE_SENTINEL = "KEINE"
+
+# Multi-choice prompts (e.g. config/prompts/tags.j2) answer in two labeled
+# lines, one for candidates to add and one for candidates to remove, so
+# the AI can also flag existing values that no longer fit - see
+# _parse_add_delete_lines().
+_ADD_LINE_RE = re.compile(r"^\s*Hinzuf(?:ü|ue)gen\s*:\s*(.*)$", re.IGNORECASE)
+_DELETE_LINE_RE = re.compile(r"^\s*L(?:ö|oe)schen\s*:\s*(.*)$", re.IGNORECASE)
 
 CANDIDATE_FETCHERS: dict[str, Callable[[PaperlessClient], list[dict]]] = {
     "document_types": lambda paperless: paperless.list_document_types(),
@@ -111,6 +120,48 @@ def _postprocess(raw_output: str, step_config: StepConfig) -> str:
     return value
 
 
+def _clean_multiline(raw_output: str, step_config: StepConfig) -> str:
+    """Like _postprocess, but preserves line breaks - for a multi-choice
+    answer laid out as labeled "Hinzufügen:"/"Löschen:" lines, where
+    _postprocess's newline-collapsing would merge both lines into one."""
+    value = raw_output.strip()
+    if step_config.max_output_length is not None:
+        value = value[: step_config.max_output_length].rstrip()
+    return value
+
+
+def _parse_add_delete_lines(text: str) -> tuple[str, str]:
+    """Parse a two-line 'Hinzufügen: ...' / 'Löschen: ...' multi-choice
+    answer into (add_part, delete_part) raw strings. Falls back to
+    treating the whole text as the add-list (delete part empty) if
+    neither label is found, so a plain comma-list/KEINE answer (older
+    prompt version, or a model that ignores the two-line format) still
+    works instead of silently losing the suggestion."""
+    add_part = ""
+    delete_part = ""
+    found_label = False
+    for line in text.splitlines():
+        match = _ADD_LINE_RE.match(line)
+        if match:
+            add_part = match.group(1).strip()
+            found_label = True
+            continue
+        match = _DELETE_LINE_RE.match(line)
+        if match:
+            delete_part = match.group(1).strip()
+            found_label = True
+            continue
+    if not found_label:
+        add_part = text.strip()
+    return add_part, delete_part
+
+
+def _split_candidate_names(part: str) -> list[str]:
+    if not part or part.strip().casefold() == NONE_SENTINEL.casefold():
+        return []
+    return [piece.strip() for piece in part.split(",") if piece.strip()]
+
+
 def process_pipeline(
     document_id: int,
     dry_run: bool = False,
@@ -181,10 +232,12 @@ def process_step(
       a candidate the AI's answer actually matched - a hallucinated or
       unparseable answer is rejected, never written to Paperless.
     - Multi-choice from candidates (`candidates_endpoint` + `multi: true`,
-      e.g. tags): same idea, but the AI may suggest several comma-
-      separated candidates; each is validated independently (invalid ones
-      are dropped, not fatal to the step) and the matched ones are ADDED
-      to the field's existing values rather than replacing them.
+      e.g. tags): the AI answers with a "Hinzufügen:"/"Löschen:" pair of
+      comma-separated candidate lists (see `_parse_add_delete_lines`);
+      each entry in both lists is validated independently (invalid ones
+      are dropped, not fatal to the step), and the final value is
+      `(current | add) - delete` - existing values are kept unless the AI
+      explicitly proposes removing them.
     - OCR quality check (step has `quality_check` set): no AI role/prompt
       at all - estimate the existing text's OCR quality, and only if it's
       below quality_threshold, re-OCR the original file via Docling Serve
@@ -661,10 +714,14 @@ def _process_multi_choice_step(
 ) -> str | None:
     """Like _process_choice_step, but for fields that hold a LIST of
     candidate ids (e.g. Paperless tags, a many-to-many relation) rather
-    than a single one: the AI may suggest several comma-separated
-    candidates, each is validated independently, and valid ones are
-    ADDED to the field's current values - existing values are never
-    removed, protecting metadata a person may have set by hand."""
+    than a single one. The AI answers in two labeled lines - "Hinzufügen:"
+    (add) and "Löschen:" (remove) - each a comma-separated list of
+    existing candidates or KEINE; each entry in both lists is validated
+    independently (an unmatched one is dropped with a warning, not fatal).
+    The final value is (current | add) - delete: suggestions to add are
+    additive, but the AI can also propose removing a currently-set value
+    that no longer fits. If a candidate appears in both lists, delete
+    wins (applied last) and a warning is logged."""
     document = paperless.get_document(document_id)
 
     candidates = _get_candidates(conn, paperless, step_config.candidates_endpoint)
@@ -685,7 +742,8 @@ def _process_multi_choice_step(
 
     input_text = str(document.get(step_config.source_field) or "").strip()
     current_ids = sorted(document.get(step_config.target_field) or [])
-    current_names = ", ".join(name_by_id.get(i, str(i)) for i in current_ids)
+    current_names_list = [name_by_id.get(i, str(i)) for i in current_ids]
+    current_names = ", ".join(current_names_list)
 
     if not input_text:
         logger.warning(
@@ -704,6 +762,9 @@ def _process_multi_choice_step(
         f"max_output_length={step_config.max_output_length}"
     )
     candidates_signature = "|".join(sorted(candidate["name"] for candidate in candidates))
+    # Current tags are part of the prompt now (so the AI can propose
+    # removing one), so they must be part of the fingerprint too.
+    current_tags_signature = "|".join(current_names_list)
     fingerprint = _fingerprint(
         truncated_text,
         prompt_version,
@@ -711,6 +772,7 @@ def _process_multi_choice_step(
         ai_config.model,
         postprocessing_signature,
         candidates_signature,
+        current_tags_signature,
     )
 
     cached = get_cached_step_result(conn, step_config.name, document_id, fingerprint)
@@ -728,6 +790,7 @@ def _process_multi_choice_step(
             step_config.prompt,
             input_text=truncated_text,
             candidate_names=[candidate["name"] for candidate in candidates],
+            current_tag_names=current_names_list,
             document_type_name=document_type_name,
         )
         ai_client = build_ai_client(ai_config)
@@ -746,7 +809,7 @@ def _process_multi_choice_step(
         logger.debug(
             "Dokument %s, Schritt %r: rohe KI-Antwort: %r", document_id, step_config.name, raw_output
         )
-        suggestion = _postprocess(raw_output, step_config)
+        suggestion = _clean_multiline(raw_output, step_config)
         save_step_result(
             conn,
             step_name=step_config.name,
@@ -765,25 +828,41 @@ def _process_multi_choice_step(
             suggestion,
         )
 
-    matched_ids: set[int] = set()
-    if suggestion.strip().casefold() != NONE_SENTINEL.casefold():
-        for piece in suggestion.split(","):
-            piece = piece.strip()
-            if not piece:
-                continue
+    add_part, delete_part = _parse_add_delete_lines(suggestion)
+
+    def _match(parts: list[str], action: str) -> set[int]:
+        matched: set[int] = set()
+        for piece in parts:
+            if step_config.strip_quotes:
+                piece = piece.strip("\"'„“”«»")
             matched_id = id_by_normalized_name.get(piece.casefold())
             if matched_id is None:
                 logger.warning(
-                    "Dokument %s, Schritt %r: Vorschlag %r entspricht keinem vorhandenen "
+                    "Dokument %s, Schritt %r: %s-Vorschlag %r entspricht keinem vorhandenen "
                     "Kandidaten, wird ignoriert",
                     document_id,
                     step_config.name,
+                    action,
                     piece,
                 )
                 continue
-            matched_ids.add(matched_id)
+            matched.add(matched_id)
+        return matched
 
-    new_ids = sorted(set(current_ids) | matched_ids)
+    add_ids = _match(_split_candidate_names(add_part), "Hinzufügen")
+    delete_ids = _match(_split_candidate_names(delete_part), "Löschen")
+
+    overlap = add_ids & delete_ids
+    if overlap:
+        logger.warning(
+            "Dokument %s, Schritt %r: Tags sowohl zum Hinzufügen als auch Löschen vorgeschlagen "
+            "(%s) - werden entfernt",
+            document_id,
+            step_config.name,
+            ", ".join(sorted(name_by_id[i] for i in overlap)),
+        )
+
+    new_ids = sorted((set(current_ids) | add_ids) - delete_ids)
     new_names = ", ".join(name_by_id.get(i, str(i)) for i in new_ids)
 
     return _apply_value(

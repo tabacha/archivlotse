@@ -310,14 +310,19 @@ true` – die KI darf mehrere, durch Komma getrennte Tags vorschlagen:
 
 Unterschiede zum einfachen Auswahl-Schritt:
 
-- Die KI antwortet mit einer kommagetrennten Liste (z. B. `"Auto,
-  Rechnung"`) oder `KEINE`, wenn kein Tag passt.
-- Jeder einzelne Vorschlag wird für sich geprüft – ein ungültiger
-  Einzelvorschlag wird nur ignoriert (mit Log-Warnung), nicht der ganze
-  Schritt verworfen.
-- Gültige Vorschläge werden zu den **bereits vorhandenen** Tags des
-  Dokuments hinzugefügt. Vorhandene Tags werden **nie entfernt** – so
-  gehen manuell gesetzte Tags nicht verloren.
+- Der Prompt (`config/prompts/tags.j2`) bekommt zusätzlich
+  `{{ current_tag_names }}` (die aktuell am Dokument gesetzten Tags) und
+  antwortet in **zwei Zeilen**: `Hinzufügen: <Liste oder KEINE>` und
+  `Löschen: <Liste oder KEINE>` – die KI kann also auch vorschlagen,
+  einen vorhandenen, nicht mehr passenden Tag zu entfernen.
+- Jeder einzelne Vorschlag (in beiden Zeilen) wird für sich geprüft – ein
+  ungültiger Einzelvorschlag wird nur ignoriert (mit Log-Warnung), nicht
+  der ganze Schritt verworfen.
+- Das Ergebnis ist `(vorhandene Tags ∪ Hinzufügen) − Löschen`. Steht ein
+  Tag in beiden Listen, gewinnt **Löschen** (mit Log-Warnung).
+- Ältere/einfachere Antworten (nur eine kommagetrennte Liste, ohne die
+  beiden Label-Zeilen) werden weiterhin als reine Hinzufügen-Liste
+  interpretiert – falls das Modell das Format trotz Anweisung ignoriert.
 
 **OCR-Qualitätsschritt `ocr_check`:** kein `prompt`/`ai_role` nötig, da
 kein KI-Aufruf stattfindet:
