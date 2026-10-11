@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+data/
+config/paperless.yaml
+config/ai.yaml
+*.db

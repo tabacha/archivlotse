@@ -1,0 +1,13 @@
+# Kopieren nach ai.yaml und anpassen.
+# "provider" waehlt den aktiv genutzten Abschnitt unten aus.
+
+provider: ollama # ollama | scaleway
+
+ollama:
+  base_url: "http://localhost:11434"
+  model: "llama3.1"
+
+scaleway:
+  base_url: "https://api.scaleway.ai/v1"
+  api_key: "${SCALEWAY_API_KEY}"
+  model: "llama-3.1-8b-instruct"

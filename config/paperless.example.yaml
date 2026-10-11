@@ -1,0 +1,6 @@
+# Kopieren nach paperless.yaml und anpassen.
+# ${PAPERLESS_TOKEN} wird aus der Umgebungsvariable ersetzt, falls gesetzt -
+# alternativ den Token direkt hier eintragen (Datei ist in .gitignore).
+
+url: "https://paperless.example.com"
+token: "${PAPERLESS_TOKEN}"
