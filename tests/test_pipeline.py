@@ -17,7 +17,7 @@ FAKE_STEP_CONFIG = StepConfig(
 
 
 class FakePaperlessClient:
-    def __init__(self, document_types=None):
+    def __init__(self, document_types=None, original_bytes=b"%PDF-fake%"):
         self.document = {
             "id": 1,
             "title": "Alter Titel",
@@ -25,6 +25,8 @@ class FakePaperlessClient:
         }
         self.update_calls: list[tuple[str, object]] = []
         self.document_types = document_types or []
+        self.original_bytes = original_bytes
+        self.download_calls = 0
 
     def __enter__(self):
         return self
@@ -41,6 +43,10 @@ class FakePaperlessClient:
 
     def list_document_types(self):
         return list(self.document_types)
+
+    def download_original(self, document_id):
+        self.download_calls += 1
+        return self.original_bytes
 
 
 class FakeAIClient:
@@ -243,3 +249,192 @@ def test_postprocess_strips_quotes_and_enforces_max_length():
     result = pipeline_module._postprocess('  "Ein sehr langer Titel"  \n', step_config)
 
     assert result == "Ein sehr l"
+
+
+FAKE_CONDITIONAL_STEP_CONFIG = StepConfig(
+    name="kontonummer",
+    prompt="title.j2",
+    ai_role="title",
+    source_field="content",
+    target_field="title",
+    condition={"document_type": "Kontoauszug"},
+)
+
+
+def test_process_step_skips_when_condition_not_met(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(document_types=DOCUMENT_TYPES)
+    fake_paperless.document["document_type"] = 1  # "Rechnung", nicht "Kontoauszug"
+    fake_ai = FakeAIClient()
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_paperless_config",
+        lambda path: PaperlessConfig(url="http://paperless.example", token="t"),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_ai_config",
+        lambda role, path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
+    )
+    monkeypatch.setattr(
+        pipeline_module, "load_step_config", lambda name, path: FAKE_CONDITIONAL_STEP_CONFIG
+    )
+    monkeypatch.setattr(pipeline_module, "PaperlessClient", lambda config: fake_paperless)
+    monkeypatch.setattr(pipeline_module, "build_ai_client", lambda config: fake_ai)
+
+    result = pipeline_module.process_step(
+        step_name="kontonummer", document_id=1, db_path=str(tmp_path / "test.db")
+    )
+
+    assert result is None
+    assert fake_ai.calls == 0
+    assert fake_paperless.update_calls == []
+
+
+def test_process_step_runs_when_condition_met(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(document_types=DOCUMENT_TYPES)
+    fake_paperless.document["document_type"] = 2  # "Kontoauszug"
+    fake_ai = FakeAIClient(title="Kontoauszug-Titel")
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_paperless_config",
+        lambda path: PaperlessConfig(url="http://paperless.example", token="t"),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_ai_config",
+        lambda role, path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
+    )
+    monkeypatch.setattr(
+        pipeline_module, "load_step_config", lambda name, path: FAKE_CONDITIONAL_STEP_CONFIG
+    )
+    monkeypatch.setattr(pipeline_module, "PaperlessClient", lambda config: fake_paperless)
+    monkeypatch.setattr(pipeline_module, "build_ai_client", lambda config: fake_ai)
+
+    result = pipeline_module.process_step(
+        step_name="kontonummer", document_id=1, db_path=str(tmp_path / "test.db")
+    )
+
+    assert result == "Kontoauszug-Titel"
+    assert fake_ai.calls == 1
+
+
+FAKE_OCR_STEP_CONFIG = StepConfig(
+    name="ocr_check",
+    prompt=None,
+    ai_role=None,
+    source_field="content",
+    target_field="content",
+    quality_check="heuristic",
+    quality_threshold=0.5,
+    min_chars_for_check=10,
+    docling_base_url="http://docling.example",
+)
+
+
+class FakeDoclingClient:
+    def __init__(self, text="Dies ist ein ordentlicher deutscher Satz mit Wörtern.", **kwargs):
+        self.text = text
+        self.calls = 0
+
+    def convert_to_text(self, filename, content, force_ocr=True):
+        self.calls += 1
+        return self.text
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
+
+
+def _patch_ocr_common(monkeypatch, fake_paperless, fake_docling_factory):
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_paperless_config",
+        lambda path: PaperlessConfig(url="http://paperless.example", token="t"),
+    )
+    monkeypatch.setattr(
+        pipeline_module, "load_step_config", lambda name, path: FAKE_OCR_STEP_CONFIG
+    )
+    monkeypatch.setattr(pipeline_module, "PaperlessClient", lambda config: fake_paperless)
+    monkeypatch.setattr(pipeline_module, "DoclingClient", fake_docling_factory)
+
+
+def test_ocr_step_skips_reocr_when_quality_already_good(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient()
+    fake_paperless.document["content"] = (
+        "Dies ist ein ganz normaler, gut lesbarer deutscher Text mit vielen "
+        "gewöhnlichen Wörtern und Sätzen, der keine Verbesserung braucht."
+    )
+    docling_calls = []
+    _patch_ocr_common(
+        monkeypatch, fake_paperless, lambda **kw: docling_calls.append(kw) or FakeDoclingClient()
+    )
+
+    result = pipeline_module.process_step(
+        step_name="ocr_check", document_id=1, db_path=str(tmp_path / "test.db")
+    )
+
+    assert result is None
+    assert docling_calls == []  # kein Docling-Aufruf noetig
+    assert fake_paperless.download_calls == 0
+    assert fake_paperless.update_calls == []
+
+
+def test_ocr_step_reocrs_and_applies_when_quality_bad(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient()
+    fake_paperless.document["content"] = "xq zrv kpt wmb flo " * 20  # Kauderwelsch, kein Wort>=3 bekannt
+    fake_docling = FakeDoclingClient(
+        text=(
+            "Dies ist ein ordentlicher deutscher Satz mit vielen Wörtern, "
+            "der nach der erneuten Erkennung viel besser lesbar ist."
+        )
+    )
+    _patch_ocr_common(monkeypatch, fake_paperless, lambda **kw: fake_docling)
+
+    result = pipeline_module.process_step(
+        step_name="ocr_check", document_id=1, db_path=str(tmp_path / "test.db")
+    )
+
+    assert result is not None
+    assert fake_docling.calls == 1
+    assert fake_paperless.download_calls == 1
+    assert fake_paperless.update_calls[0][0] == "content"
+    assert fake_paperless.update_calls[0][1] == fake_docling.text
+
+
+def test_ocr_step_rejects_docling_result_that_is_far_shorter(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient()
+    fake_paperless.document["content"] = "xq zrv kpt wmb flo " * 20
+    fake_docling = FakeDoclingClient(text="zu kurz")
+    _patch_ocr_common(monkeypatch, fake_paperless, lambda **kw: fake_docling)
+
+    result = pipeline_module.process_step(
+        step_name="ocr_check", document_id=1, db_path=str(tmp_path / "test.db")
+    )
+
+    assert result is None
+    assert fake_paperless.update_calls == []
+
+
+def test_process_pipeline_runs_all_steps_in_order_and_survives_a_failure(monkeypatch, tmp_path):
+    call_order = []
+
+    def fake_process_step(step_name, document_id, **kwargs):
+        call_order.append(step_name)
+        if step_name == "broken":
+            raise RuntimeError("boom")
+        return f"ok:{step_name}"
+
+    monkeypatch.setattr(pipeline_module, "load_pipeline_order", lambda path: ["a", "broken", "b"])
+    monkeypatch.setattr(pipeline_module, "process_step", fake_process_step)
+
+    results = pipeline_module.process_pipeline(document_id=1, db_path=str(tmp_path / "test.db"))
+
+    assert call_order == ["a", "broken", "b"]
+    assert results == {"a": "ok:a", "broken": None, "b": "ok:b"}

@@ -32,6 +32,12 @@ class PaperlessClient:
         pagination, each as {"id": ..., "name": ..., ...}."""
         return self._list_all("/api/document_types/")
 
+    def download_original(self, document_id: int) -> bytes:
+        """Fetch the original (unmodified) document file."""
+        response = self._client.get(f"/api/documents/{document_id}/download/")
+        response.raise_for_status()
+        return response.content
+
     def _list_all(self, path: str) -> list[dict]:
         results: list[dict] = []
         url: str | None = path

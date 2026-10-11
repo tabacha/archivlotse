@@ -9,14 +9,24 @@ from .config import load_yaml
 @dataclass
 class StepConfig:
     name: str
-    prompt: str
-    ai_role: str
     source_field: str
     target_field: str
+    prompt: str | None = None
+    ai_role: str | None = None
     max_input_chars: int = 8000
     strip_quotes: bool = True
     max_output_length: int | None = None
     candidates_endpoint: str | None = None
+    # Nur fuer OCR-Qualitaetsschritte (quality_check gesetzt):
+    quality_check: str | None = None
+    quality_threshold: float = 0.6
+    min_chars_for_check: int = 200
+    docling_base_url: str | None = None
+    docling_force_ocr: bool = True
+    # Schritt nur ausfuehren, wenn das genannte Feld (bzw. bei
+    # "document_type" dessen aufgeloester Name) dem erwarteten Wert
+    # entspricht, z.B. {"document_type": "Kontoauszug"}.
+    condition: dict[str, str] | None = None
 
 
 def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepConfig:
@@ -36,6 +46,13 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
     AI's answer is validated against that list before anything is written
     back - an answer that doesn't match an existing candidate is rejected
     rather than applied.
+
+    If quality_check is set (e.g. "heuristic"), this is instead an OCR
+    quality-check/improve step: no AI role/prompt is used at all. See
+    archivlotse/ocr_quality.py and archivlotse/docling.py.
+
+    If condition is set, the step is skipped entirely (no AI/Docling
+    call) unless the document's current field value(s) match.
     """
     data = load_yaml(path)
     steps = data.get("steps", {})
@@ -50,15 +67,57 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
 
     preprocessing = step.get("preprocessing", {}) or {}
     postprocessing = step.get("postprocessing", {}) or {}
+    docling = step.get("docling", {}) or {}
+    quality_check = step.get("quality_check")
 
-    return StepConfig(
+    config = StepConfig(
         name=name,
-        prompt=step["prompt"],
-        ai_role=step["ai_role"],
         source_field=step["source_field"],
         target_field=step["target_field"],
+        prompt=step.get("prompt"),
+        ai_role=step.get("ai_role"),
         max_input_chars=preprocessing.get("max_input_chars", 8000),
         strip_quotes=postprocessing.get("strip_quotes", True),
         max_output_length=postprocessing.get("max_length"),
         candidates_endpoint=step.get("candidates_endpoint"),
+        quality_check=quality_check,
+        quality_threshold=step.get("quality_threshold", 0.6),
+        min_chars_for_check=step.get("min_chars_for_check", 200),
+        docling_base_url=docling.get("base_url"),
+        docling_force_ocr=docling.get("force_ocr", True),
+        condition=step.get("condition"),
     )
+
+    if quality_check:
+        if quality_check not in ("heuristic", "ai_judge"):
+            raise ValueError(
+                f"Schritt {name!r}: unbekannter quality_check {quality_check!r} "
+                "(erwartet 'heuristic' oder 'ai_judge')"
+            )
+        if quality_check == "ai_judge" and (not config.prompt or not config.ai_role):
+            raise ValueError(
+                f"Schritt {name!r}: quality_check 'ai_judge' benötigt 'prompt' und 'ai_role'"
+            )
+        if quality_check == "heuristic" and not config.docling_base_url:
+            raise ValueError(f"Schritt {name!r}: quality_check benötigt 'docling.base_url'")
+    elif not config.prompt or not config.ai_role:
+        raise ValueError(
+            f"Schritt {name!r}: 'prompt' und 'ai_role' sind erforderlich (außer bei "
+            "quality_check-Schritten)"
+        )
+
+    return config
+
+
+def load_pipeline_order(path: str | Path = "config/steps.yaml") -> list[str]:
+    """Load the ordered list of step names under `pipeline:` in
+    config/steps.yaml - the order `archivlotse process <id>` (without
+    --step) runs them in."""
+    data = load_yaml(path)
+    pipeline = data.get("pipeline")
+    if not pipeline:
+        raise ValueError(
+            f"Keine 'pipeline:'-Liste in {path} definiert - für 'archivlotse process <id>' "
+            "ohne --step wird eine Schrittreihenfolge benötigt."
+        )
+    return list(pipeline)

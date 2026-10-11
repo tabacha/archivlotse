@@ -8,27 +8,39 @@
 # Im Unterschied zu config/paperless.yaml und config/ai.yaml enthaelt diese
 # Datei keine Zugangsdaten und wird daher direkt mit Git versioniert.
 
+# Reihenfolge, in der "archivlotse process <id>" (ohne --step) die Schritte
+# ausfuehrt. Jeder Schritt liest das Dokument frisch aus Paperless, sieht
+# also Aenderungen vorheriger Schritte - deshalb document_type vor title
+# (title-Prompt nutzt den Dokumenttyp). Im --dry-run sieht ein spaeterer
+# Schritt die Aenderung eines frueheren Schritts NICHT, da dann nichts
+# tatsaechlich geschrieben wird.
+pipeline:
+  - ocr_check
+  - document_type
+  - title
+
 steps:
-  title:
-    # Paperless-Feld, das als Eingabetext fuer den Prompt gelesen wird.
+  # Vorhandenen OCR-Text auf Qualitaet pruefen und bei Bedarf per Docling
+  # Serve neu erkennen (force_ocr). Kein KI-Aufruf noetig
+  # (quality_check: heuristic), daher auch kein prompt/ai_role.
+  # quality_check: ai_judge ist als Alternative vorgesehen, aber noch
+  # nicht implementiert.
+  ocr_check:
     source_field: content
-    # Paperless-Feld, das mit dem Ergebnis beschrieben wird.
-    target_field: title
+    target_field: content # gleiches Feld: aktualisiert den Text, falls besser
 
-    prompt: title.j2
-    ai_role: title
+    quality_check: heuristic
+    # Schwelle bewusst konservativ gewaehlt (Heuristik calibriert an
+    # echten Dokumenten, siehe archivlotse/ocr_quality.py fuer bekannte
+    # Grenzen, z.B. bei zahlenlastigen Dokumenten).
+    quality_threshold: 0.50
+    # Kuerzere Texte werden nicht geprueft (Heuristik auf wenig Text
+    # unzuverlässig).
+    min_chars_for_check: 200
 
-    preprocessing:
-      # Laengerer Eingabetext wird vor dem Rendern des Prompts auf so
-      # viele Zeichen gekuerzt.
-      max_input_chars: 8000
-
-    postprocessing:
-      # Anfuehrungszeichen am Rand der Modellantwort entfernen.
-      strip_quotes: true
-      # Zur Sicherheit auf maximal so viele Zeichen kuerzen, falls sich
-      # das Modell nicht an die Laengenvorgabe im Prompt haelt.
-      max_length: 120
+    docling:
+      base_url: "http://127.0.0.1:5001"
+      force_ocr: true
 
   document_type:
     source_field: content
@@ -49,3 +61,24 @@ steps:
     postprocessing:
       strip_quotes: true
       max_length: 200
+
+  title:
+    # Paperless-Feld, das als Eingabetext fuer den Prompt gelesen wird.
+    source_field: content
+    # Paperless-Feld, das mit dem Ergebnis beschrieben wird.
+    target_field: title
+
+    prompt: title.j2
+    ai_role: title
+
+    preprocessing:
+      # Laengerer Eingabetext wird vor dem Rendern des Prompts auf so
+      # viele Zeichen gekuerzt.
+      max_input_chars: 8000
+
+    postprocessing:
+      # Anfuehrungszeichen am Rand der Modellantwort entfernen.
+      strip_quotes: true
+      # Zur Sicherheit auf maximal so viele Zeichen kuerzen, falls sich
+      # das Modell nicht an die Laengenvorgabe im Prompt haelt.
+      max_length: 120

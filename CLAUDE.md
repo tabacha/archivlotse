@@ -4,12 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-The project concept lives in `doc/PROJEKTIDEE.md` (German). Implementation is a generic, config-driven pipeline engine (`archivlotse/pipeline.py: process_step`) with two step shapes:
+The project concept lives in `doc/PROJEKTIDEE.md` (German). Implementation is a generic, config-driven pipeline engine (`archivlotse/pipeline.py: process_step`) with three step shapes:
 
 - **Text steps** (e.g. `title`): read one Paperless field, run it through a prompt + AI role, write the cleaned-up free-text result to another Paperless field.
 - **Choice steps** (e.g. `document_type`): same, but the AI must pick one value out of an existing Paperless list (fetched live via the Paperless API), and a suggestion that doesn't match an existing candidate is rejected rather than written. This is the first bit of the concept doc's "validate before writing" / "never invent new metadata objects" principle actually implemented.
+- **OCR quality step** (`ocr_check`): no AI role/prompt at all — a heuristic (`archivlotse/ocr_quality.py`) estimates whether the existing `content` is usable; if not, the original file is downloaded from Paperless and re-OCR'd via Docling Serve (`archivlotse/docling.py`), with the result written back only if it passes a basic sanity check. This is the first bit of the concept doc's "Schritt 1: Dokumentprüfung und OCR".
 
-Both shapes are entirely driven by `config/steps.yaml`, with no step-specific Python code for ordinary cases. Currently defined steps: `title` (OCR text → title, Ollama) and `document_type` (OCR text → document type, Scaleway `mistral-small-3.2-24b-instruct-2506`). Most of the pipeline described below (OCR improvement, correspondent/tag matching, custom fields, long-document handling, queueing) does not exist yet. Treat the rest of this file as the target architecture, not current state, and update this section as more steps/capabilities land.
+All three shapes are driven by `config/steps.yaml`, with no step-specific Python code for ordinary cases. A `pipeline:` list in the same file defines the step order; `archivlotse process <id>` (no `--step`) runs them all via `process_pipeline`, with a failing step logged and skipped rather than aborting the rest. Text/choice steps also support an optional `condition:` (skip the step unless the document's current field — currently only `document_type`, resolved by name — matches), and every prompt render additionally receives `{{ document_type_name }}`, so e.g. `title.j2` can branch its instructions by document type.
+
+Currently defined steps/roles: `ocr_check` (heuristic, Docling at `http://127.0.0.1:5001`), `document_type` (OCR text → document type, Scaleway `mistral-small-3.2-24b-instruct-2506`), `title` (OCR text → title, Ollama, document-type-aware). Most of the rest of the concept doc (correspondent/tag matching, custom fields, long-document handling, queueing, `quality_check: ai_judge`) does not exist yet. Treat the rest of this file as the target architecture, not current state, and update this section as more steps/capabilities land.
 
 ## Commands
 
@@ -23,35 +26,44 @@ pytest
 # Run a single test
 pytest tests/test_pipeline.py::test_process_step_is_idempotent_and_audits_only_on_change
 
-# Run a config-defined step for a Paperless document (needs config/paperless.yaml + config/ai.yaml)
+# Run one config-defined step for a Paperless document (needs config/paperless.yaml + config/ai.yaml)
 archivlotse process 6023 --step title --dry-run
 archivlotse process 6023 --step title
 archivlotse process 6023 --step title --ai-role precise  # override the role from config/steps.yaml
 archivlotse process 6023 --step document_type --dry-run --verbose  # also logs the full prompt + raw AI answer at DEBUG
+
+# Run the whole pipeline (config/steps.yaml: pipeline:) for one document
+archivlotse process 6023 --dry-run
+archivlotse process 6023
 ```
 
-End users who don't want a dev install can still run the same thing as `python -m archivlotse.cli process ...` from the repo root without `pip install -e .` (only the three runtime deps need to be present). See `README.md` for the beginner-oriented setup walkthrough (venv, config, troubleshooting) — keep that in sync with CLI/config changes made here.
+End users who don't want a dev install can still run the same thing as `python -m archivlotse.cli process ...` from the repo root without `pip install -e .` (only the runtime deps need to be present). See `README.md` for the beginner-oriented setup walkthrough (venv, config, troubleshooting) — keep that in sync with CLI/config changes made here.
 
-Local config: copy `config/paperless.example.yaml` → `config/paperless.yaml` and `config/ai.example.yaml` → `config/ai.yaml` (both gitignored — they hold secrets; values can reference env vars as `${VAR_NAME}`, expanded via `os.path.expandvars` before YAML parsing). `config/steps.yaml` holds no secrets and is committed as-is. SQLite state defaults to `data/archivlotse.db` (gitignored, created on first run; `archivlotse/db.py` auto-migrates an older schema in place on open, so existing local audit history survives schema changes).
+Local config: copy `config/paperless.example.yaml` → `config/paperless.yaml` and `config/ai.example.yaml` → `config/ai.yaml` (both gitignored — they hold secrets; values can reference env vars as `${VAR_NAME}`, expanded via `os.path.expandvars` before YAML parsing). `config/steps.yaml` and `config/prompts/*.j2` hold no secrets and are committed as-is — deliberately kept OUTSIDE the `archivlotse` Python package and resolved relative to the current working directory (default `"config/prompts"`, see `archivlotse/prompts.py`), same as the other config files, so prompts/step rules can be edited in a deployment (e.g. a mounted volume in Docker) without rebuilding/reinstalling the package. SQLite state defaults to `data/archivlotse.db` (gitignored, created on first run; `archivlotse/db.py` auto-migrates an older schema in place on open, so existing local audit history survives schema changes).
 
 ## Implemented so far (`archivlotse/pipeline.py`)
 
 Config layering, in the order it's read:
 
-1. **`config/steps.yaml`** (`archivlotse/steps.py`, committed, no secrets) — per step: `source_field` (Paperless field read as input), `target_field` (Paperless field written with the result), which `.j2` prompt to render (receives the input as `{{ input_text }}`), which AI *role* to use, pre-/post-processing (`preprocessing.max_input_chars` truncates input before rendering; `postprocessing.strip_quotes`/`max_length` clean up the raw model output), and optionally `candidates_endpoint` (makes it a choice step; the prompt additionally receives `{{ candidate_names }}`). `archivlotse/pipeline.py` has no hardcoded knowledge of "title", "document_type", or any other field/step — it's all read from here.
-2. **`config/ai.yaml`** (`archivlotse/config.py: load_ai_config`/`load_ai_roles`, gitignored) — two sections: `providers:` (connection details once per backend — for `scaleway`, `access_key_id` + `secret_key`, matching the labels in Scaleway's IAM console; only `secret_key` is actually used, as the Bearer token for the Generative APIs, `access_key_id` is carried through for reference only) and `roles:` (logical task name → `provider` + `model`). Multiple roles can share one provider/credentials. `--ai-role` on the CLI overrides the role named in `steps.yaml`.
+1. **`config/steps.yaml`** (`archivlotse/steps.py`, committed, no secrets) — a top-level `pipeline:` (ordered step names) plus `steps:` entries, each with: `source_field`/`target_field` (Paperless fields read/written), `condition` (optional skip rule), and either (a) `prompt` + `ai_role` + pre-/post-processing (`preprocessing.max_input_chars`, `postprocessing.strip_quotes`/`max_length`) for text/choice steps, optionally with `candidates_endpoint` (makes it a choice step; the prompt additionally receives `{{ candidate_names }}`), or (b) `quality_check` + `quality_threshold` + `min_chars_for_check` + `docling: {base_url, force_ocr}` for the OCR step. `load_step_config` validates which fields are required per shape. `archivlotse/pipeline.py` has no hardcoded knowledge of "title", "document_type", or any other field/step — it's all read from here.
+2. **`config/ai.yaml`** (`archivlotse/config.py: load_ai_config`/`load_ai_roles`, gitignored) — two sections: `providers:` (connection details once per backend — for `scaleway`, `access_key_id` + `secret_key`, matching the labels in Scaleway's IAM console; only `secret_key` is actually used, as the Bearer token for the Generative APIs, `access_key_id` is carried through for reference only) and `roles:` (logical task name → `provider` + `model`). Multiple roles can share one provider/credentials. `--ai-role` on the CLI overrides the role named in `steps.yaml` (single-step mode only).
 3. **`config/paperless.yaml`** (gitignored) — Paperless `url` + `token`.
 
-Processing (`process_step` in `archivlotse/pipeline.py`) dispatches on `step_config.candidates_endpoint`:
+Processing (`process_step` in `archivlotse/pipeline.py`) dispatches on `step_config.quality_check` then `step_config.candidates_endpoint`:
 
-- **Text steps** (`_process_text_step`): fetch the document, render the prompt with the truncated input, call the AI, clean up the raw output (`_postprocess`), write it verbatim to `target_field`.
-- **Choice steps** (`_process_choice_step`): same, but first fetches live candidates via `CANDIDATE_FETCHERS[step_config.candidates_endpoint]` (currently only `"document_types"` → `PaperlessClient.list_document_types()`, paginated). The prompt gets the candidate names; a cleaned-up AI answer is matched case/whitespace-insensitively against them. An answer equal to the `UNBEKANNT` sentinel, or one that matches no candidate, is **not** written to Paperless (logged as info/warning respectively, no audit entry) — this is the validation-before-write principle from the concept doc. A match writes the candidate's **id** to Paperless (`target_field` expects an FK id, not a name) but logs/audits the human-readable name.
-- Both share: fetching the document and `PaperlessClient` (`GET`/`PATCH /api/documents/{id}/`, `Authorization: Token ...`); the resolved AI backend (`archivlotse/ai/`: `OllamaClient` for Ollama's `/api/generate`, `OpenAICompatibleClient` for Scaleway/other OpenAI-compatible chat-completions APIs); and `_apply_value()`, which compares old vs. new, skips on no-op or `--dry-run`, and otherwise calls `update_document_field` + `append_audit_log`.
-- **Idempotency:** before calling the AI, computes a SHA-256 fingerprint over (truncated input text, prompt template content, provider, model, postprocessing settings, and — for choice steps — the sorted candidate names) and checks it against the `step_results` SQLite table (keyed by `step_name` + `document_id` + fingerprint); a hit reuses the stored value/suggestion and skips the AI call entirely. Changing any of those fingerprint inputs (incl. the Paperless document-types list for `document_type`) forces recomputation.
-- **Audit log:** the separate `audit_log` SQLite table (`document_id`, `field_name`, `old_value`, `new_value`, `changed_at`) only ever gets a row when a field is actually written to Paperless — never on cache hits, no-op (value unchanged), rejected/unknown choice-step suggestions, or `--dry-run`.
-- `--dry-run` runs the full pipeline (including the AI call and `step_results` caching) but skips the Paperless `PATCH` and the audit log entry.
+- **Text steps** (`_process_text_step`): fetch the document, resolve `document_type_name` (`_resolve_document_type_name`, via `PaperlessClient.list_document_types()`), skip if `_condition_met()` fails, render the prompt (`input_text` + `document_type_name`), call the AI, clean up the raw output (`_postprocess`), write it verbatim to `target_field`.
+- **Choice steps** (`_process_choice_step`): same condition/document-type-name handling (reusing the already-fetched candidates list when the step itself *is* `document_types`, to avoid a duplicate API call), then fetches live candidates via `CANDIDATE_FETCHERS[step_config.candidates_endpoint]` (currently only `"document_types"` → `PaperlessClient.list_document_types()`, paginated). The prompt gets the candidate names; a cleaned-up AI answer is matched case/whitespace-insensitively against them. An answer equal to the `UNBEKANNT` sentinel, or one that matches no candidate, is **not** written to Paperless (logged as info/warning respectively, no audit entry). A match writes the candidate's **id** to Paperless (`target_field` expects an FK id, not a name) but logs/audits the human-readable name.
+- **OCR step** (`_process_ocr_step`): no condition/document-type-name handling (not needed). Scores the current `source_field` text with `ocr_quality_score()`; if ≥ `quality_threshold`, returns immediately (no download, no Docling call — cheap). Otherwise downloads the original file (`PaperlessClient.download_original`), converts it via `DoclingClient.convert_to_text(..., force_ocr=...)` (`POST /v1/convert/file`, `to_formats=text`), and writes the result **unconditionally accepting Docling's output** as long as it passes `MIN_OCR_LENGTH_RATIO` (not drastically shorter than the original) — it deliberately does **not** compare old vs. new quality scores to decide (see `ocr_quality.py` docstring and the calibration note below for why that comparison is unreliable). `old_value`/`new_value` passed to the audit log are short `"[N Zeichen, Score X.XX]"` summaries, not the full text (`_apply_value`'s `write_value` vs. display-`new_value` split, originally added for choice steps' id/name split, is reused here for raw-text/summary).
+- All three share `_apply_value()`: compares old vs. new, skips on no-op or `--dry-run`, otherwise calls `update_document_field` + `append_audit_log`.
+- **Idempotency:** before calling the AI/Docling, computes a SHA-256 fingerprint (`_fingerprint(*parts)`, now variadic) over the relevant inputs (truncated text, prompt version, provider/model, postprocessing settings, candidate list for choice steps, or Docling config for the OCR step) and checks it against the `step_results` SQLite table (keyed by `step_name` + `document_id` + fingerprint); a hit skips the AI/Docling call entirely.
+- **Audit log:** the separate `audit_log` SQLite table (`document_id`, `field_name`, `old_value`, `new_value`, `changed_at`) only ever gets a row when a field is actually written to Paperless — never on cache hits, no-op, rejected choice suggestions, skipped conditions, a "good enough" OCR check, or `--dry-run`.
+- `--dry-run` runs the full step (including any AI/Docling call and `step_results` caching) but skips the Paperless `PATCH` and the audit log entry.
 
-Adding the next **text** step is pure config: a new `.j2` prompt in `archivlotse/prompts/`, a new entry under `steps:` in `config/steps.yaml`, and a matching role in `config/ai.yaml` if needed — no changes to `pipeline.py`. Adding another **choice** step (e.g. correspondent, tags) needs one small code change too: a new entry in `CANDIDATE_FETCHERS` (and, for a Paperless field that isn't a plain FK like `document_type` — e.g. `tags` is a many-to-many — `_process_choice_step`/`_apply_value` would need adjusting, since they currently assume a single scalar id). Steps needing multiple input fields, fuzzy/RapidFuzz candidate pre-selection, or multi-field output (e.g. future `document_date`, `invoice`/`bank_statement` extraction steps from the concept doc) will need more substantial changes to `pipeline.py`, not just config.
+`process_pipeline` (new) loads `pipeline:` via `load_pipeline_order` and calls `process_step` for each name in order, catching and logging (not re-raising) any exception per step so e.g. an unreachable Docling doesn't block `document_type`/`title`. Each step still does its own fresh `paperless.get_document()`, so a later step sees an earlier step's actual Paperless write — except in `--dry-run`, where nothing is written, so later steps keep seeing pre-pipeline state (documented caveat, not a bug).
+
+**OCR heuristic calibration note** (see `ocr_quality.py` for the full docstring): tested against real documents, a plain "fraction of alphabetic tokens length≥3" heuristic, a longest-good-run heuristic, and a vowel-presence heuristic all failed to reliably separate genuinely garbled OCR from fine-but-numeric-heavy documents (bank statements) or fine-but-noisy-header documents (barcode/address-block lines). The shipped heuristic uses `wordfreq.zipf_frequency(word, "de") >= 4.0` as the "is this a real word" test, which calibrated reasonably (known-bad document ~0.47, known-good documents 0.74–0.92) — but a **re-OCR'd, jargon/proper-noun-heavy document can still score lower than its own garbled original** (verified live against a vehicle registration certificate), so old-vs-new score comparison is not used for the accept/reject decision, only the initial "is the existing text good enough to skip re-OCR" gate.
+
+Adding the next **text** step is pure config: a new `.j2` prompt in `config/prompts/`, a new entry under `steps:` (and `pipeline:`) in `config/steps.yaml`, and a matching role in `config/ai.yaml` if needed — no changes to `pipeline.py`. Adding another **choice** step (e.g. correspondent, tags) needs one small code change too: a new entry in `CANDIDATE_FETCHERS` (and, for a Paperless field that isn't a plain FK like `document_type` — e.g. `tags` is a many-to-many — `_process_choice_step`/`_apply_value` would need adjusting, since they currently assume a single scalar id). A **custom field** (e.g. `Kontonummer`, discussed but not built) needs real new code: Paperless writes custom fields via a different payload shape (`{"custom_fields": [{"field": id, "value": ...}]}`), not a flat top-level key, so it can't reuse `update_document_field`/`_apply_value` as-is. Steps needing multiple input fields, fuzzy/RapidFuzz candidate pre-selection, or multi-field output (e.g. future `document_date`, `invoice`/`bank_statement` extraction steps from the concept doc) will need more substantial changes to `pipeline.py`, not just config.
 
 ## What ArchivLotse is
 
@@ -84,12 +96,12 @@ Guiding principle: **as little AI as necessary, as much traceability as possible
 ## Intended CLI shape
 
 ```bash
-archivlotse process 6023 --dry-run
-archivlotse process 6023 --step title
-archivlotse process 6023 --step document_date
-archivlotse process --tag ki-test --limit 10
-archivlotse status 6023
-archivlotse audit 6023
+archivlotse process 6023 --dry-run          # implemented: whole pipeline
+archivlotse process 6023 --step title       # implemented: single step
+archivlotse process 6023 --step document_date  # not implemented (no such step yet)
+archivlotse process --tag ki-test --limit 10   # not implemented (no bulk/tag selection yet)
+archivlotse status 6023                         # not implemented
+archivlotse audit 6023                          # not implemented (query data/archivlotse.db directly for now)
 ```
 
 `--dry-run` is a first-class mode: runs all analyses/validations without writing any metadata back to Paperless. Production operation is meant to add a persistent queue, retries, and resumable jobs — this is explicitly Phase 3, not required for a prototype.
@@ -104,8 +116,9 @@ archivlotse audit 6023
 | Structured AI results | Pydantic |
 | HTTP APIs | httpx |
 | Fuzzy name matching | RapidFuzz |
+| OCR quality heuristic | wordfreq (implemented) |
 | Local status/audit DB | SQLite |
-| OCR | Docling Serve / RapidOCR |
+| OCR | Docling Serve (implemented) / RapidOCR |
 | AI backends | Ollama + OpenAI-compatible APIs |
 | Deployment | Docker Compose |
 | Tests | pytest |

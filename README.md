@@ -5,9 +5,9 @@ Vorkenntnisse in Python-Paketierung.
 
 Aktueller Stand: ArchivLotse führt generische, in `config/steps.yaml`
 definierte Verarbeitungsschritte aus – ein Schritt liest ein Paperless-Feld
-(z. B. den OCR-Text), lässt ein KI-Modell daraus einen Wert erzeugen und
-schreibt das Ergebnis (optional) in ein anderes Paperless-Feld zurück. Es
-gibt zwei Arten von Schritten:
+(z. B. den OCR-Text), ermittelt daraus einen Wert und schreibt ihn
+(optional) in ein anderes Paperless-Feld zurück. Es gibt drei Arten von
+Schritten:
 
 - **Freitext-Schritte** wie `title`: die KI erzeugt frei formulierten Text
   (z. B. einen Titel).
@@ -15,14 +15,22 @@ gibt zwei Arten von Schritten:
   einen von mehreren **bereits in Paperless vorhandenen** Werten
   entscheiden (hier: einen Dokumenttyp). Ein Vorschlag, der zu keinem
   vorhandenen Dokumenttyp passt, wird verworfen und **nicht** gespeichert.
+- **OCR-Qualitätsschritt** `ocr_check`: kein KI-Aufruf, sondern eine
+  Heuristik schätzt, ob der vorhandene Text brauchbar ist; falls nicht,
+  wird das Originaldokument über eine lokale Docling-Serve-Instanz neu
+  erkannt.
+
+Mehrere Schritte lassen sich zu einer **Pipeline** verketten (Reihenfolge
+in `pipeline:` in `config/steps.yaml`); `archivlotse process <id>` ohne
+`--step` führt sie alle der Reihe nach aus, jeder Schritt sieht dabei die
+(echten, nicht Dry-Run-) Änderungen der vorherigen Schritte.
 
 Weitere Freitext-Schritte lassen sich rein über Config ergänzen (siehe
 Abschnitt 3.3) – ohne Python-Code zu ändern; ein weiterer Auswahl-Schritt
 (z. B. für Korrespondenten oder Tags) braucht zusätzlich eine kleine
 Codeänderung (eine neue Zeile in `CANDIDATE_FETCHERS` in
 `archivlotse/pipeline.py`). Alles Weitere aus der Projektidee
-(`doc/PROJEKTIDEE.md`, z. B. OCR-Verbesserung, Custom Fields) ist noch
-nicht gebaut.
+(`doc/PROJEKTIDEE.md`, z. B. Custom Fields) ist noch nicht gebaut.
 
 ## 1. Voraussetzungen
 
@@ -38,6 +46,10 @@ nicht gebaut.
 - Mindestens ein KI-Backend: Ollama (lokal oder per Netzwerk erreichbar)
   und/oder einen Zugang zu Scaleway Model-as-a-Service (API-Key). Du kannst
   auch beides parallel einrichten und später je nach Aufgabe wählen.
+- Für den `ocr_check`-Schritt (optional): eine erreichbare
+  [Docling Serve](https://github.com/docling-project/docling-serve)-Instanz.
+  Ohne Docling kannst du die anderen Schritte trotzdem normal nutzen –
+  `ocr_check` einfach aus `pipeline:` in `config/steps.yaml` entfernen.
 
 ## 2. Projektordner vorbereiten
 
@@ -80,15 +92,17 @@ archivlotse --help
 
 ## 3. Konfiguration einrichten
 
-ArchivLotse liest drei Konfigurationsdateien:
+ArchivLotse liest Konfiguration aus `config/`:
 
 - `config/paperless.yaml` und `config/ai.yaml` enthalten Zugangsdaten
   (Token, API-Keys) und werden daher aus Beispieldateien kopiert – die
   echten Dateien sind in Git ignoriert, landen also nicht versehentlich
   in einem Commit.
-- `config/steps.yaml` enthält **keine** Zugangsdaten, nur fachliche
-  Pipeline-Regeln (welcher Prompt, welche Rolle, Vor-/Nachbearbeitung) –
-  diese Datei ist bereits im Projekt vorhanden und mit Git versioniert.
+- `config/steps.yaml` und `config/prompts/*.j2` enthalten **keine**
+  Zugangsdaten, nur fachliche Pipeline-Regeln und die eigentlichen
+  KI-Prompts – beides ist bereits im Projekt vorhanden und mit Git
+  versioniert, lässt sich also anpassen, ohne den Python-Code oder ein
+  Docker-Image neu zu bauen.
 
 ```bash
 cp config/paperless.example.yaml config/paperless.yaml
@@ -173,12 +187,17 @@ Python-Code selbst weiß nichts über "Titel" oder irgendein anderes Feld,
 das steht ausschließlich hier:
 
 ```yaml
+pipeline:
+  - ocr_check
+  - document_type
+  - title
+
 steps:
   title:
     source_field: content # Paperless-Feld, das als Eingabetext gelesen wird
     target_field: title # Paperless-Feld, das mit dem Ergebnis beschrieben wird
 
-    prompt: title.j2 # Datei in archivlotse/prompts/
+    prompt: title.j2 # Datei in config/prompts/
     ai_role: title # Rolle aus config/ai.yaml
 
     preprocessing:
@@ -189,16 +208,43 @@ steps:
       max_length: 120 # zur Sicherheit auf max. so viele Zeichen kuerzen
 ```
 
+`pipeline:` legt fest, in welcher Reihenfolge `archivlotse process <id>`
+(ohne `--step`) die Schritte ausführt – siehe Abschnitt 4.
+
 Für den mitgelieferten Titel-Schritt musst du hier normalerweise nichts
 ändern – nur wenn du z. B. einen anderen Prompt ausprobieren oder die
 maximale Titellänge anpassen möchtest.
 
 **Einen neuen Freitext-Schritt hinzufügen** geht rein über Config, ohne
-Python-Code zu ändern: eine `.j2`-Prompt-Datei unter `archivlotse/prompts/`
+Python-Code zu ändern: eine `.j2`-Prompt-Datei unter `config/prompts/`
 anlegen, einen neuen Eintrag unter `steps:` ergänzen (mit `source_field`,
-`target_field`, `prompt`, `ai_role`) und bei Bedarf eine passende Rolle in
-`config/ai.yaml`. Der Prompt bekommt den (ggf. gekürzten) Inhalt von
-`source_field` als Variable `{{ input_text }}`.
+`target_field`, `prompt`, `ai_role`), ihn in `pipeline:` einsortieren und
+bei Bedarf eine passende Rolle in `config/ai.yaml`. Der Prompt bekommt:
+
+- `{{ input_text }}`: den (ggf. gekürzten) Inhalt von `source_field`.
+- `{{ document_type_name }}`: den Namen des aktuell gesetzten
+  Dokumenttyps (oder leer, falls keiner gesetzt ist) – damit kann ein
+  Prompt sein Verhalten je nach Dokumenttyp anpassen, z. B. in
+  `title.j2`:
+
+  ```jinja
+  {% if document_type_name == "Kontoauszug" %}
+  - Dies ist ein Kontoauszug. Nenne den Buchungszeitraum im Titel.
+  {% endif %}
+  ```
+
+**Schritt nur bedingt ausführen:** ein optionales `condition:` überspringt
+den gesamten Schritt (kein KI-Aufruf, nichts geschrieben), wenn das
+aktuelle Dokument nicht passt, z. B. nur für Kontoauszüge:
+
+```yaml
+    condition:
+      document_type: Kontoauszug
+```
+
+Aktuell wird nur `document_type` als Bedingungsfeld aufgelöst (vom
+Namen, nicht der ID); andere Feldnamen werden direkt mit dem
+Paperless-Rohwert verglichen.
 
 **Auswahl-Schritt `document_type`:** hier muss die KI sich für einen der
 tatsächlich in Paperless vorhandenen Dokumenttypen entscheiden, statt
@@ -225,12 +271,49 @@ freien Text zu erzeugen:
       max_length: 200
 ```
 
-Der Prompt (`archivlotse/prompts/document_type.j2`) bekommt zusätzlich zu
+Der Prompt (`config/prompts/document_type.j2`) bekommt zusätzlich zu
 `{{ input_text }}` die Liste `{{ candidate_names }}` (alle vorhandenen
 Dokumenttypnamen) und ist angewiesen, exakt `UNBEKANNT` zu antworten, wenn
 keiner passt. Geschrieben wird in Paperless die **ID** des passenden
 Dokumenttyps (`document_type` erwartet in der API eine ID, keinen Namen);
 im Audit-Log stehen aber die lesbaren Namen, nicht die IDs.
+
+**OCR-Qualitätsschritt `ocr_check`:** kein `prompt`/`ai_role` nötig, da
+kein KI-Aufruf stattfindet:
+
+```yaml
+  ocr_check:
+    source_field: content
+    target_field: content # gleiches Feld: aktualisiert content, falls besser
+
+    quality_check: heuristic # bisher einzige Option (ai_judge geplant)
+    quality_threshold: 0.50
+    min_chars_for_check: 200 # kuerzere Texte werden nicht geprueft
+
+    docling:
+      base_url: "http://127.0.0.1:5001"
+      force_ocr: true
+```
+
+Ablauf: Das vorhandene `content`-Feld wird mit einer Heuristik bewertet
+(Anteil der Wörter, die in einer deutschen Wortfrequenzliten als
+einigermaßen gebräuchlich gelten – siehe `archivlotse/ocr_quality.py`).
+Liegt der Score unter `quality_threshold`, wird das Originaldokument von
+Paperless heruntergeladen, über Docling Serve mit `force_ocr` neu erkannt,
+und das Ergebnis geschrieben – sofern es nicht verdächtig viel kürzer ist
+als der vorhandene Text (einfache Notbremse).
+
+**Wichtige Einschränkung, bitte lesen:** Die Heuristik ist bewusst simpel
+und wurde an echten Dokumenten kalibriert, hat aber nachweisliche
+Schwächen: zahlenlastige Dokumente (Kontoauszüge, Formulare) werden
+tendenziell niedriger bewertet als sie es "verdienen", und beim Vergleich
+"alter vs. neuer Text" liefert sie keine verlässliche Aussage, welcher
+Text besser ist (ein fachsprachlich korrekter Text kann einen niedrigeren
+Score bekommen als sein eigenes verrauschtes Original). Deshalb wird der
+Score **nicht** benutzt, um zu entscheiden, ob das Docling-Ergebnis
+übernommen wird – nur, um zu entscheiden, ob überhaupt ein Re-OCR-Versuch
+lohnt. Bei Bedarf `quality_threshold` anpassen oder stichprobenartig mit
+`--dry-run --verbose` nachprüfen.
 
 ## 4. Erster Testlauf (Dry-Run)
 
@@ -242,11 +325,20 @@ du ein Dokument öffnest).
 ```bash
 archivlotse process 6023 --step title --dry-run
 archivlotse process 6023 --step document_type --dry-run
+archivlotse process 6023 --dry-run  # ganze Pipeline (siehe pipeline: in steps.yaml)
 ```
 
 Die Ausgabe zeigt unter anderem, welcher Titel bzw. Dokumenttyp
 vorgeschlagen wird und ob er sich vom aktuellen Wert unterscheidet. Es
 wird aber nichts in Paperless gespeichert.
+
+Ohne `--step` werden alle Schritte aus `pipeline:` der Reihe nach
+ausgeführt. Im **Dry-Run** fetcht trotzdem jeder Schritt das Dokument neu
+aus Paperless – da im Dry-Run aber nichts geschrieben wird, sieht z. B.
+der `title`-Schritt dort noch den *alten* Dokumenttyp, nicht den vom
+vorherigen `document_type`-Schritt gerade vorgeschlagenen. Im echten Lauf
+(ohne `--dry-run`) sieht jeder Schritt dagegen die tatsächlich
+gespeicherten Änderungen der vorherigen Schritte.
 
 ## 5. Echter Lauf
 
@@ -255,6 +347,7 @@ tatsächlich in Paperless gespeichert:
 
 ```bash
 archivlotse process 6023 --step title
+archivlotse process 6023  # ganze Pipeline
 ```
 
 Führst du den Befehl für dasselbe Dokument ein zweites Mal aus, ohne dass
@@ -320,10 +413,17 @@ ARCHIVLOTSE_LOG_LEVEL=DEBUG archivlotse process 6023 --step title --dry-run
 - `ValueError: Scaleway provider requires 'secret_key'` → `secret_key`
   beim jeweiligen Scaleway-Provider in `config/ai.yaml` ausfüllen.
 - `403 Forbidden` / `"insufficient permissions to access the resource"`
-  von Scaleway → fast immer, weil in `base_url` die Project-ID im Pfad
-  fehlt (`https://api.scaleway.ai/v1` statt
-  `https://api.scaleway.ai/<project-id>/v1`). Die korrekte URL inkl.
-  Project-ID steht in der Scaleway-Konsole im Code-Beispiel pro Modell.
+  von Scaleway → zwei mögliche Ursachen:
+  1. In `base_url` fehlt die Project-ID im Pfad
+     (`https://api.scaleway.ai/v1` statt
+     `https://api.scaleway.ai/<project-id>/v1`). Die korrekte URL inkl.
+     Project-ID steht in der Scaleway-Konsole im Code-Beispiel pro Modell.
+  2. Der API-Key hat keine passende IAM-Policy. Unter
+     https://console.scaleway.com/iam/policies prüfen, ob der
+     User/die Application, zu der der Key gehört, eine Policy mit
+     Permission-Set `GenerativeApisModelAccess` (oder
+     `GenerativeApisFullAccess`/`AllProductsFullAccess`) für das
+     betreffende Project hat.
 - `Unbekannter Verarbeitungsschritt 'title' in config/steps.yaml` →
   `config/steps.yaml` fehlt oder wurde versehentlich verändert/gelöscht.
 - Log-Zeile „KI-Vorschlag ... entspricht keinem vorhandenen Kandidaten,
@@ -331,6 +431,13 @@ ARCHIVLOTSE_LOG_LEVEL=DEBUG archivlotse process 6023 --step title --dry-run
   eingebaute Validierung: die KI hat etwas vorgeschlagen, das nicht
   exakt einem vorhandenen Dokumenttyp entspricht, und der Vorschlag wurde
   bewusst **nicht** übernommen.
+- `Schritt ... quality_check 'ai_judge' ist noch nicht implementiert` →
+  bisher ist nur `quality_check: heuristic` für `ocr_check` gebaut.
+- Verbindungsfehler zu Docling bei `ocr_check` → `docling.base_url` in
+  `config/steps.yaml` prüfen, erreichbar per
+  `curl http://127.0.0.1:5001/health`. Ohne Docling kannst du `ocr_check`
+  einfach aus `pipeline:` entfernen und die anderen Schritte weiter per
+  `--step` einzeln nutzen.
 
 ## 9. Tests ausführen (optional, für Entwickler)
 
