@@ -20,6 +20,11 @@ class AIConfig:
     model: str
     access_key_id: str | None = None
     secret_key: str | None = None
+    # Preis je 1 Million Tokens (Input/Output), fuer die Kostenschaetzung
+    # pro Aufruf. Bei "ollama" (lokal) wird unabhaengig davon mit $0
+    # gerechnet - diese Felder sind nur fuer Cloud-Provider relevant.
+    price_per_1m_input: float | None = None
+    price_per_1m_output: float | None = None
 
 
 def load_yaml(path: str | Path) -> dict:
@@ -61,6 +66,8 @@ def load_ai_roles(path: str | Path = "config/ai.yaml") -> dict[str, AIConfig]:
             model=role["model"],
             access_key_id=provider.get("access_key_id"),
             secret_key=provider.get("secret_key"),
+            price_per_1m_input=role.get("price_per_1m_input"),
+            price_per_1m_output=role.get("price_per_1m_output"),
         )
     return roles
 

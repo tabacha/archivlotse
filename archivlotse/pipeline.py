@@ -111,6 +111,40 @@ def _condition_met(step_config: StepConfig, document: dict, document_type_name: 
     return True
 
 
+def _estimate_cost(
+    ai_config: AIConfig, prompt_tokens: int | None, completion_tokens: int | None
+) -> float | None:
+    """Estimate the USD cost of one AI call from its token usage. Ollama
+    runs locally, so it's always treated as free ($0), independent of
+    whether pricing is configured. For other providers, returns None if
+    pricing (config/ai.yaml: price_per_1m_input/output) or usage data
+    isn't available, rather than silently guessing $0."""
+    if ai_config.provider == "ollama":
+        return 0.0
+    if ai_config.price_per_1m_input is None or ai_config.price_per_1m_output is None:
+        return None
+    if prompt_tokens is None or completion_tokens is None:
+        return None
+    return (
+        prompt_tokens / 1_000_000 * ai_config.price_per_1m_input
+        + completion_tokens / 1_000_000 * ai_config.price_per_1m_output
+    )
+
+
+def _log_usage(document_id: int, step_name: str, ai_config: AIConfig, ai_result) -> float | None:
+    cost = _estimate_cost(ai_config, ai_result.prompt_tokens, ai_result.completion_tokens)
+    cost_str = f"${cost:.6f}" if cost is not None else "unbekannt (kein Preis konfiguriert)"
+    logger.info(
+        "Dokument %s, Schritt %r: Tokenverbrauch prompt=%s completion=%s, geschätzte Kosten: %s",
+        document_id,
+        step_name,
+        ai_result.prompt_tokens,
+        ai_result.completion_tokens,
+        cost_str,
+    )
+    return cost
+
+
 def _postprocess(raw_output: str, step_config: StepConfig) -> str:
     value = " ".join(raw_output.split())
     if step_config.strip_quotes:
@@ -346,11 +380,12 @@ def _process_text_step(
         logger.debug(
             "Dokument %s, Schritt %r: vollständiger Prompt:\n%s", document_id, step_config.name, prompt
         )
-        raw_output = ai_client.generate(prompt)
+        ai_result = ai_client.generate(prompt)
         logger.debug(
-            "Dokument %s, Schritt %r: rohe KI-Antwort: %r", document_id, step_config.name, raw_output
+            "Dokument %s, Schritt %r: rohe KI-Antwort: %r", document_id, step_config.name, ai_result.text
         )
-        value = _postprocess(raw_output, step_config)
+        cost = _log_usage(document_id, step_config.name, ai_config, ai_result)
+        value = _postprocess(ai_result.text, step_config)
         save_step_result(
             conn,
             step_name=step_config.name,
@@ -361,6 +396,9 @@ def _process_text_step(
             model=ai_config.model,
             prompt_name=step_config.prompt,
             prompt_version=prompt_version,
+            prompt_tokens=ai_result.prompt_tokens,
+            completion_tokens=ai_result.completion_tokens,
+            estimated_cost_usd=cost,
         )
         logger.info(
             "Dokument %s, Schritt %r: neues Ergebnis berechnet: %r",
@@ -463,11 +501,12 @@ def _process_choice_step(
         logger.debug(
             "Dokument %s, Schritt %r: vollständiger Prompt:\n%s", document_id, step_config.name, prompt
         )
-        raw_output = ai_client.generate(prompt)
+        ai_result = ai_client.generate(prompt)
         logger.debug(
-            "Dokument %s, Schritt %r: rohe KI-Antwort: %r", document_id, step_config.name, raw_output
+            "Dokument %s, Schritt %r: rohe KI-Antwort: %r", document_id, step_config.name, ai_result.text
         )
-        suggestion = _postprocess(raw_output, step_config)
+        cost = _log_usage(document_id, step_config.name, ai_config, ai_result)
+        suggestion = _postprocess(ai_result.text, step_config)
         save_step_result(
             conn,
             step_name=step_config.name,
@@ -478,6 +517,9 @@ def _process_choice_step(
             model=ai_config.model,
             prompt_name=step_config.prompt,
             prompt_version=prompt_version,
+            prompt_tokens=ai_result.prompt_tokens,
+            completion_tokens=ai_result.completion_tokens,
+            estimated_cost_usd=cost,
         )
         logger.info(
             "Dokument %s, Schritt %r: neuer Vorschlag: %r",
@@ -721,7 +763,9 @@ def _process_multi_choice_step(
     The final value is (current | add) - delete: suggestions to add are
     additive, but the AI can also propose removing a currently-set value
     that no longer fits. If a candidate appears in both lists, delete
-    wins (applied last) and a warning is logged."""
+    wins (applied last) and a warning is logged. step_config.protected_candidates
+    names candidates that are never deleted, no matter what the AI
+    suggests - an enforced guarantee, independent of the prompt text."""
     document = paperless.get_document(document_id)
 
     candidates = _get_candidates(conn, paperless, step_config.candidates_endpoint)
@@ -805,11 +849,12 @@ def _process_multi_choice_step(
         logger.debug(
             "Dokument %s, Schritt %r: vollständiger Prompt:\n%s", document_id, step_config.name, prompt
         )
-        raw_output = ai_client.generate(prompt)
+        ai_result = ai_client.generate(prompt)
         logger.debug(
-            "Dokument %s, Schritt %r: rohe KI-Antwort: %r", document_id, step_config.name, raw_output
+            "Dokument %s, Schritt %r: rohe KI-Antwort: %r", document_id, step_config.name, ai_result.text
         )
-        suggestion = _clean_multiline(raw_output, step_config)
+        cost = _log_usage(document_id, step_config.name, ai_config, ai_result)
+        suggestion = _clean_multiline(ai_result.text, step_config)
         save_step_result(
             conn,
             step_name=step_config.name,
@@ -820,6 +865,9 @@ def _process_multi_choice_step(
             model=ai_config.model,
             prompt_name=step_config.prompt,
             prompt_version=prompt_version,
+            prompt_tokens=ai_result.prompt_tokens,
+            completion_tokens=ai_result.completion_tokens,
+            estimated_cost_usd=cost,
         )
         logger.info(
             "Dokument %s, Schritt %r: neuer Vorschlag: %r",
@@ -851,6 +899,23 @@ def _process_multi_choice_step(
 
     add_ids = _match(_split_candidate_names(add_part), "Hinzufügen")
     delete_ids = _match(_split_candidate_names(delete_part), "Löschen")
+
+    if step_config.protected_candidates:
+        protected_normalized = {name.strip().casefold() for name in step_config.protected_candidates}
+        blocked_delete_ids = {
+            tag_id
+            for tag_id in delete_ids
+            if name_by_id.get(tag_id, "").strip().casefold() in protected_normalized
+        }
+        if blocked_delete_ids:
+            logger.info(
+                "Dokument %s, Schritt %r: Löschen von %s wird ignoriert (in config/steps.yaml "
+                "als protected_candidates geschützt)",
+                document_id,
+                step_config.name,
+                ", ".join(sorted(name_by_id[i] for i in blocked_delete_ids)),
+            )
+            delete_ids -= blocked_delete_ids
 
     overlap = add_ids & delete_ids
     if overlap:

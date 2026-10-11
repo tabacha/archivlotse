@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import archivlotse.pipeline as pipeline_module
+from archivlotse.ai.base import AIResult
 from archivlotse.config import AIConfig, PaperlessConfig
 from archivlotse.steps import StepConfig
 
@@ -58,13 +59,17 @@ class FakePaperlessClient:
 
 
 class FakeAIClient:
-    def __init__(self, title: str = "Neuer Titel"):
+    def __init__(self, title: str = "Neuer Titel", prompt_tokens: int = 10, completion_tokens: int = 5):
         self.title = title
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
         self.calls = 0
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str) -> AIResult:
         self.calls += 1
-        return self.title
+        return AIResult(
+            text=self.title, prompt_tokens=self.prompt_tokens, completion_tokens=self.completion_tokens
+        )
 
 
 def test_process_step_is_idempotent_and_audits_only_on_change(monkeypatch, tmp_path):
@@ -588,6 +593,30 @@ def test_multi_choice_step_delete_wins_on_add_delete_conflict(monkeypatch, tmp_p
     assert fake_paperless.update_calls == []
 
 
+def test_multi_choice_step_never_deletes_protected_candidates(monkeypatch, tmp_path):
+    protected_config = StepConfig(
+        name="tags",
+        prompt="tags.j2",
+        ai_role="tags",
+        source_field="content",
+        target_field="tags",
+        candidates_endpoint="tags",
+        multi=True,
+        protected_candidates=["TODO"],
+    )
+    fake_paperless = FakePaperlessClient(tags=TAGS)
+    fake_paperless.document["tags"] = [3]  # "TODO"
+    fake_ai = FakeAIClient(title="Hinzufügen: Auto\nLöschen: TODO")
+    _patch_multi_choice_common(monkeypatch, fake_paperless, fake_ai)
+    monkeypatch.setattr(pipeline_module, "load_step_config", lambda name, path: protected_config)
+
+    pipeline_module.process_step(step_name="tags", document_id=1, db_path=str(tmp_path / "test.db"))
+
+    # "TODO" ist geschuetzt -> Loeschvorschlag wird ignoriert, bleibt
+    # erhalten; "Auto" wird trotzdem hinzugefuegt.
+    assert fake_paperless.update_calls == [("tags", [1, 3])]
+
+
 def test_multi_choice_step_passes_current_tags_to_prompt(monkeypatch, tmp_path):
     fake_paperless = FakePaperlessClient(tags=TAGS)
     fake_paperless.document["tags"] = [3]  # "TODO"
@@ -607,3 +636,60 @@ def test_multi_choice_step_passes_current_tags_to_prompt(monkeypatch, tmp_path):
 
     assert captured["current_tag_names"] == ["TODO"]
     assert captured["candidate_names"] == ["Auto", "Rechnung", "TODO"]
+
+
+def test_estimate_cost_is_zero_for_ollama_regardless_of_pricing():
+    config = AIConfig(provider="ollama", base_url="http://x", model="m")
+    assert pipeline_module._estimate_cost(config, 1000, 1000) == 0.0
+
+
+def test_estimate_cost_returns_none_without_configured_pricing():
+    config = AIConfig(provider="scaleway", base_url="http://x", model="m")
+    assert pipeline_module._estimate_cost(config, 1000, 1000) is None
+
+
+def test_estimate_cost_computes_from_configured_pricing():
+    config = AIConfig(
+        provider="scaleway",
+        base_url="http://x",
+        model="m",
+        price_per_1m_input=1.0,
+        price_per_1m_output=2.0,
+    )
+    # 500_000 Tokens Input (0.5 * $1) + 250_000 Tokens Output (0.25 * $2)
+    cost = pipeline_module._estimate_cost(config, 500_000, 250_000)
+    assert cost == 1.0
+
+
+def test_step_results_store_token_usage_and_cost(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient()
+    fake_ai = FakeAIClient(title="Neuer Titel", prompt_tokens=123, completion_tokens=45)
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_paperless_config",
+        lambda path: PaperlessConfig(url="http://paperless.example", token="t"),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_ai_config",
+        lambda role, path: AIConfig(
+            provider="scaleway",
+            base_url="http://scaleway.example",
+            model="m",
+            price_per_1m_input=1.0,
+            price_per_1m_output=2.0,
+        ),
+    )
+    monkeypatch.setattr(pipeline_module, "load_step_config", lambda name, path: FAKE_STEP_CONFIG)
+    monkeypatch.setattr(pipeline_module, "PaperlessClient", lambda config: fake_paperless)
+    monkeypatch.setattr(pipeline_module, "build_ai_client", lambda config: fake_ai)
+
+    db_path = str(tmp_path / "test.db")
+    pipeline_module.process_step(step_name="title", document_id=1, db_path=db_path)
+
+    conn = pipeline_module.init_db(db_path)
+    row = conn.execute("SELECT * FROM step_results").fetchone()
+    assert row["prompt_tokens"] == 123
+    assert row["completion_tokens"] == 45
+    assert row["estimated_cost_usd"] == 123 / 1_000_000 * 1.0 + 45 / 1_000_000 * 2.0

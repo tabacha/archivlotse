@@ -23,6 +23,9 @@ def init_db(path: str | Path = "data/archivlotse.db") -> sqlite3.Connection:
             model TEXT NOT NULL,
             prompt_name TEXT NOT NULL,
             prompt_version TEXT NOT NULL,
+            prompt_tokens INTEGER,
+            completion_tokens INTEGER,
+            estimated_cost_usd REAL,
             created_at TEXT NOT NULL,
             UNIQUE (step_name, document_id, fingerprint)
         )
@@ -50,6 +53,7 @@ def init_db(path: str | Path = "data/archivlotse.db") -> sqlite3.Connection:
         """
     )
     _migrate_legacy_audit_log(conn)
+    _migrate_step_results_usage_columns(conn)
     conn.commit()
     return conn
 
@@ -68,6 +72,18 @@ def _migrate_legacy_audit_log(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE audit_log ADD COLUMN field_name TEXT NOT NULL DEFAULT 'title'"
         )
+
+
+def _migrate_step_results_usage_columns(conn: sqlite3.Connection) -> None:
+    """Add token-usage/cost columns to a step_results table created
+    before cost tracking existed, in place, without losing history."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(step_results)")}
+    if "prompt_tokens" not in columns:
+        conn.execute("ALTER TABLE step_results ADD COLUMN prompt_tokens INTEGER")
+    if "completion_tokens" not in columns:
+        conn.execute("ALTER TABLE step_results ADD COLUMN completion_tokens INTEGER")
+    if "estimated_cost_usd" not in columns:
+        conn.execute("ALTER TABLE step_results ADD COLUMN estimated_cost_usd REAL")
 
 
 def get_cached_step_result(
@@ -89,13 +105,17 @@ def save_step_result(
     model: str,
     prompt_name: str,
     prompt_version: str,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    estimated_cost_usd: float | None = None,
 ) -> None:
     conn.execute(
         """
         INSERT INTO step_results
             (step_name, document_id, fingerprint, output_value, provider, model,
-             prompt_name, prompt_version, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             prompt_name, prompt_version, prompt_tokens, completion_tokens,
+             estimated_cost_usd, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             step_name,
@@ -106,6 +126,9 @@ def save_step_result(
             model,
             prompt_name,
             prompt_version,
+            prompt_tokens,
+            completion_tokens,
+            estimated_cost_usd,
             datetime.now(timezone.utc).isoformat(),
         ),
     )

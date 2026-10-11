@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import httpx
 
+from .base import AIResult
+
 
 class OpenAICompatibleClient:
     """Chat-completion client for Scaleway Model-as-a-Service and other
@@ -19,7 +21,7 @@ class OpenAICompatibleClient:
             timeout=timeout,
         )
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str) -> AIResult:
         response = self._client.post(
             "/chat/completions",
             json={
@@ -28,7 +30,13 @@ class OpenAICompatibleClient:
             },
         )
         response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
+        data = response.json()
+        usage = data.get("usage") or {}
+        return AIResult(
+            text=data["choices"][0]["message"]["content"],
+            prompt_tokens=usage.get("prompt_tokens"),
+            completion_tokens=usage.get("completion_tokens"),
+        )
 
     def close(self) -> None:
         self._client.close()

@@ -36,15 +36,24 @@ roles:
   # Klassifizierung (ein Label aus einer kurzen Liste waehlen) braucht
   # kein grosses/teures Modell - mistral-small ist auf Scaleway aktuell
   # das guenstigste Modell mit guter Mehrsprachigkeit.
+  #
+  # price_per_1m_input/output (USD je 1 Million Tokens) sind optional,
+  # aktivieren aber die Kostenschaetzung im Log und in step_results
+  # (siehe README "Kosten pro KI-Aufruf"). Fuer ollama-Rollen nicht
+  # noetig - lokale Anfragen werden immer als $0 gezaehlt.
   document_type:
     provider: scaleway
     model: "mistral-small-3.2-24b-instruct-2506"
+    price_per_1m_input: 0.15
+    price_per_1m_output: 0.35
 
   # Mehrfachauswahl (z.B. Tags) ist auch "nur" Klassifizierung - dasselbe
   # guenstige Modell reicht.
   tags:
     provider: scaleway
     model: "mistral-small-3.2-24b-instruct-2506"
+    price_per_1m_input: 0.15
+    price_per_1m_output: 0.35
 
   # Beispiel: eine weitere Rolle nutzt denselben Scaleway-Zugang mit einem
   # staerkeren Modell fuer komplexere Aufgaben, ohne den API-Key erneut
@@ -52,3 +61,5 @@ roles:
   precise:
     provider: scaleway
     model: "llama-3.3-70b-instruct"
+    price_per_1m_input: 0.90
+    price_per_1m_output: 0.90

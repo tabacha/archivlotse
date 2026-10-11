@@ -71,13 +71,17 @@ steps:
     ai_role: tags
 
     # Tags sind eine Mehrfachauswahl (ein Dokument kann mehrere haben).
-    # Die KI darf mehrere, durch Komma getrennte, vorhandene Tags
-    # vorschlagen (candidates_endpoint: tags). Unbekannte Einzelvorschlaege
+    # Die KI antwortet mit "Hinzufuegen: ..."/"Loeschen: ..." (siehe
+    # tags.j2) und darf so auch vorschlagen, einen nicht mehr passenden
+    # Tag zu entfernen. Unbekannte Einzelvorschlaege (in beiden Listen)
     # werden nur einzeln verworfen statt den ganzen Schritt abzulehnen.
-    # Vorgeschlagene Tags werden zu den vorhandenen HINZUGEFUEGT - bereits
-    # gesetzte Tags werden nie entfernt.
     candidates_endpoint: tags
     multi: true
+
+    # Diese Tags werden NIE geloescht, unabhaengig davon, was die KI
+    # vorschlaegt (Schutz auf Config-Ebene, nicht nur per Prompt-Text).
+    protected_candidates:
+      - TODO
 
     preprocessing:
       max_input_chars: 8000

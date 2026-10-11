@@ -177,6 +177,16 @@ Du brauchst nur die Provider zu pflegen, die du tatsächlich in `roles:`
 verwendest. Welche Rolle der Titel-Schritt benutzt, lässt sich auch beim
 Aufruf überschreiben (siehe unten, `--ai-role`) – Standard ist `title`.
 
+**Kosten pro KI-Aufruf:** trägst du bei einer Rolle `price_per_1m_input`
+und `price_per_1m_output` ein (US-Dollar je 1 Million Tokens, siehe
+Scaleways Preisliste), schätzt ArchivLotse die Kosten jedes Aufrufs
+anhand der tatsächlich verbrauchten Tokens und loggt sie
+(`Tokenverbrauch prompt=... completion=..., geschätzte Kosten: $...`)
+sowie in `step_results` (`prompt_tokens`, `completion_tokens`,
+`estimated_cost_usd`). Für `ollama`-Rollen ist das nicht nötig – lokale
+Anfragen werden immer als `$0` gezählt. Ohne hinterlegten Preis wird nur
+der Tokenverbrauch geloggt, die Kosten als „unbekannt" markiert.
+
 Statt Zugangsdaten direkt in die Datei zu schreiben, kannst du auch
 Umgebungsvariablen benutzen, z. B. `token: "${PAPERLESS_TOKEN}"` oder
 `secret_key: "${SCALEWAY_SECRET_KEY}"` – dann wird beim Start der Wert
@@ -412,7 +422,8 @@ keine separate Serverinstallation nötig). Darin stehen drei Tabellen:
 
 - `step_results`: jedes berechnete Ergebnis (für jeden Schritt), inkl.
   verwendetem Modell und Prompt – dient als Cache, damit nichts doppelt
-  berechnet wird.
+  berechnet wird. Enthält außerdem `prompt_tokens`, `completion_tokens`
+  und `estimated_cost_usd` pro KI-Aufruf (siehe Abschnitt 7).
 - `audit_log`: nur Einträge zu tatsächlich in Paperless geänderten
   Feldern (Dokument-ID, Feldname, alter Wert, neuer Wert, Zeitpunkt).
 - `candidate_cache`: zwischengespeicherte Kandidatenlisten (Dokumenttypen,

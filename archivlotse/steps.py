@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import load_yaml
@@ -21,6 +21,10 @@ class StepConfig:
     # mehrere, kommagetrennte Kandidaten vorschlagen; gueltige Vorschlaege
     # werden zu den vorhandenen Werten HINZUGEFUEGT statt sie zu ersetzen.
     multi: bool = False
+    # Kandidaten (per Namen, z.B. Tag-Namen), die ein Mehrfachauswahl-
+    # Schritt NIE loeschen darf, unabhaengig davon, was die KI vorschlaegt.
+    # Schutz auf Code-/Config-Ebene, nicht nur per Prompt-Anweisung.
+    protected_candidates: list[str] = field(default_factory=list)
     # Nur fuer OCR-Qualitaetsschritte (quality_check gesetzt):
     quality_check: str | None = None
     quality_threshold: float = 0.6
@@ -57,6 +61,11 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
 
     If condition is set, the step is skipped entirely (no AI/Docling
     call) unless the document's current field value(s) match.
+
+    protected_candidates (multi-choice steps only) lists candidate names
+    that may never be removed, regardless of what the AI suggests - an
+    enforced, config-level guarantee rather than relying on the prompt
+    text alone.
     """
     data = load_yaml(path)
     steps = data.get("steps", {})
@@ -85,6 +94,7 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
         max_output_length=postprocessing.get("max_length"),
         candidates_endpoint=step.get("candidates_endpoint"),
         multi=step.get("multi", False),
+        protected_candidates=list(step.get("protected_candidates") or []),
         quality_check=quality_check,
         quality_threshold=step.get("quality_threshold", 0.6),
         min_chars_for_check=step.get("min_chars_for_check", 200),
