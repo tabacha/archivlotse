@@ -1,13 +1,32 @@
 # Kopieren nach ai.yaml und anpassen.
-# "provider" waehlt den aktiv genutzten Abschnitt unten aus.
+#
+# 1) Unter "providers" einmal pro Backend die Zugangsdaten eintragen,
+#    z.B. ein lokales Ollama und einen Cloud-Dienst wie Scaleway.
+#    Ein API-Key steht hier nur EINMAL pro Provider, auch wenn mehrere
+#    Rollen weiter unten denselben Cloud-Dienst benutzen.
+#
+# 2) Unter "roles" pro logischer Aufgabe festlegen, welcher Provider und
+#    welches Modell benutzt wird. "title" ist die Rolle fuer den
+#    Titel-Schritt (archivlotse title ...); weitere Rollen (z.B. fuer
+#    spaetere Schritte) koennen beliebig ergaenzt werden.
 
-provider: ollama # ollama | scaleway
+providers:
+  ollama_lokal:
+    type: ollama
+    base_url: "http://127.0.0.1:11434"
 
-ollama:
-  base_url: "http://localhost:11434"
-  model: "llama3.1"
+  scaleway:
+    type: scaleway
+    base_url: "https://api.scaleway.ai/v1"
+    api_key: "${SCALEWAY_API_KEY}"
 
-scaleway:
-  base_url: "https://api.scaleway.ai/v1"
-  api_key: "${SCALEWAY_API_KEY}"
-  model: "llama-3.1-8b-instruct"
+roles:
+  title:
+    provider: ollama_lokal
+    model: "qwen3:4b-instruct"
+
+  # Beispiel: eine zweite Rolle nutzt denselben Scaleway-Zugang mit einem
+  # anderen Modell, ohne den API-Key erneut eintragen zu muessen.
+  precise:
+    provider: scaleway
+    model: "llama-3.1-8b-instruct"

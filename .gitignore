@@ -4,7 +4,9 @@ __pycache__/
 venv/
 *.egg-info/
 .pytest_cache/
+build/
 data/
 config/paperless.yaml
 config/ai.yaml
 *.db
+*~

@@ -1,0 +1,23 @@
+# Fachliche Pipeline-Konfiguration: pro Verarbeitungsschritt, welcher
+# Jinja2-Prompt und welche Modellrolle (aus config/ai.yaml) benutzt wird,
+# sowie einfache Vor-/Nachbearbeitung rund um den KI-Aufruf.
+#
+# Im Unterschied zu config/paperless.yaml und config/ai.yaml enthaelt diese
+# Datei keine Zugangsdaten und wird daher direkt mit Git versioniert.
+
+steps:
+  title:
+    prompt: title.j2
+    ai_role: title
+
+    preprocessing:
+      # Laengerer OCR-Text wird vor dem Rendern des Prompts auf so viele
+      # Zeichen gekuerzt.
+      max_input_chars: 8000
+
+    postprocessing:
+      # Anfuehrungszeichen am Rand der Modellantwort entfernen.
+      strip_quotes: true
+      # Zur Sicherheit auf maximal so viele Zeichen kuerzen, falls sich
+      # das Modell nicht an die Laengenvorgabe im Prompt haelt.
+      max_length: 120

@@ -9,7 +9,7 @@ The project concept lives in `doc/PROJEKTIDEE.md` (German). Implementation has s
 ## Commands
 
 ```bash
-# Install
+# Install (editable; also registers the `archivlotse` console script)
 pip install -e ".[dev]"
 
 # Run tests
@@ -19,21 +19,32 @@ pytest
 pytest tests/test_title.py::test_process_title_is_idempotent_and_audits_only_on_change
 
 # Compute/update a title for a Paperless document (needs config/paperless.yaml + config/ai.yaml)
-python -m archivlotse.cli title 6023 --dry-run
-python -m archivlotse.cli title 6023
+archivlotse title 6023 --dry-run
+archivlotse title 6023
+archivlotse title 6023 --ai-role precise  # override the role from config/steps.yaml
 ```
 
-Local config: copy `config/paperless.example.yaml` → `config/paperless.yaml` and `config/ai.example.yaml` → `config/ai.yaml` (both gitignored; secrets can also come from env vars referenced as `${VAR_NAME}`, expanded via `os.path.expandvars` before YAML parsing). SQLite state defaults to `data/archivlotse.db` (gitignored, created on first run).
+End users who don't want a dev install can still run the same thing as `python -m archivlotse.cli title ...` from the repo root without `pip install -e .` (only the three runtime deps need to be present). See `README.md` for the beginner-oriented setup walkthrough (venv, config, troubleshooting) — keep that in sync with CLI/config changes made here.
+
+Local config: copy `config/paperless.example.yaml` → `config/paperless.yaml` and `config/ai.example.yaml` → `config/ai.yaml` (both gitignored — they hold secrets; values can reference env vars as `${VAR_NAME}`, expanded via `os.path.expandvars` before YAML parsing). `config/steps.yaml` holds no secrets and is committed as-is. SQLite state defaults to `data/archivlotse.db` (gitignored, created on first run).
 
 ## Implemented so far (`archivlotse/title.py`)
 
-- Fetches a document from Paperless (`archivlotse/paperless.py`, `GET`/`PATCH /api/documents/{id}/`, `Authorization: Token ...`).
-- Renders `prompts/title.j2` with the (truncated to `MAX_OCR_CHARS`) OCR text and calls the configured AI provider (`archivlotse/ai/`: `OllamaClient` for Ollama's `/api/generate`, `OpenAICompatibleClient` for Scaleway/other OpenAI-compatible chat-completions APIs — selected via `AIConfig.provider` in `config/ai.yaml`).
-- **Idempotency:** before calling the AI, computes a SHA-256 fingerprint over (truncated OCR text, prompt template content, provider, model) and checks it against the `title_results` SQLite table; a hit reuses the stored title and skips the AI call entirely. Any change to the OCR text, the prompt file, or the configured provider/model invalidates the cache and forces recomputation.
+Config layering, in the order it's read:
+
+1. **`config/steps.yaml`** (`archivlotse/steps.py`, committed, no secrets) — per pipeline step: which `.j2` prompt to render, which AI *role* to use, and pre-/post-processing (`preprocessing.max_input_chars` truncates OCR text before rendering; `postprocessing.strip_quotes`/`max_length` clean up the raw model output). The title step is named `title`.
+2. **`config/ai.yaml`** (`archivlotse/config.py: load_ai_config`/`load_ai_roles`, gitignored) — two sections: `providers:` (connection details incl. API key, once per backend) and `roles:` (logical task name → `provider` + `model`). Multiple roles can share one provider/token. `--ai-role` on the CLI overrides the role named in `steps.yaml`.
+3. **`config/paperless.yaml`** (gitignored) — Paperless `url` + `token`.
+
+Processing (`process_title` in `archivlotse/title.py`):
+
+- Fetches the document from Paperless (`archivlotse/paperless.py`, `GET`/`PATCH /api/documents/{id}/`, `Authorization: Token ...`).
+- Renders the step's prompt with the truncated OCR text and calls the resolved AI backend (`archivlotse/ai/`: `OllamaClient` for Ollama's `/api/generate`, `OpenAICompatibleClient` for Scaleway/other OpenAI-compatible chat-completions APIs).
+- **Idempotency:** before calling the AI, computes a SHA-256 fingerprint over (truncated OCR text, prompt template content, provider, model, postprocessing settings) and checks it against the `title_results` SQLite table; a hit reuses the stored title and skips the AI call entirely. Changing the OCR text, the prompt file, the configured provider/model, or the postprocessing rules invalidates the cache and forces recomputation.
 - **Audit log:** the separate `audit_log` SQLite table only ever gets a row when a title is actually written to Paperless (old title, new title, document ID, timestamp) — never on cache hits, no-op (title unchanged), or `--dry-run`.
 - `--dry-run` runs the full pipeline (including the AI call and `title_results` caching) but skips the Paperless `PATCH` and the audit log entry.
 
-When adding the next pipeline step, follow this same shape: one `.j2` prompt, one cache table keyed by an input fingerprint (text + prompt version + provider + model), and audit-log writes gated strictly on an actual Paperless field change.
+When adding the next pipeline step: add an entry under `steps:` in `config/steps.yaml` (prompt + ai_role + pre/postprocessing), a matching role in `config/ai.yaml`, and follow the same shape in code — one cache table (or reuse `title_results`-style caching) keyed by an input fingerprint, and audit-log writes gated strictly on an actual Paperless field change.
 
 ## What ArchivLotse is
 

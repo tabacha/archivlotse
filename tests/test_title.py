@@ -2,6 +2,16 @@ from __future__ import annotations
 
 import archivlotse.title as title_module
 from archivlotse.config import AIConfig, PaperlessConfig
+from archivlotse.steps import StepConfig
+
+FAKE_STEP_CONFIG = StepConfig(
+    name="title",
+    prompt="title.j2",
+    ai_role="title",
+    max_input_chars=8000,
+    strip_quotes=True,
+    max_output_length=120,
+)
 
 
 class FakePaperlessClient:
@@ -49,8 +59,9 @@ def test_process_title_is_idempotent_and_audits_only_on_change(monkeypatch, tmp_
     monkeypatch.setattr(
         title_module,
         "load_ai_config",
-        lambda path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
+        lambda role, path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
     )
+    monkeypatch.setattr(title_module, "load_step_config", lambda name, path: FAKE_STEP_CONFIG)
     monkeypatch.setattr(title_module, "PaperlessClient", lambda config: fake_paperless)
     monkeypatch.setattr(title_module, "build_ai_client", lambda config: fake_ai)
 
@@ -94,8 +105,9 @@ def test_process_title_recomputes_when_ocr_text_changes(monkeypatch, tmp_path):
     monkeypatch.setattr(
         title_module,
         "load_ai_config",
-        lambda path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
+        lambda role, path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
     )
+    monkeypatch.setattr(title_module, "load_step_config", lambda name, path: FAKE_STEP_CONFIG)
     monkeypatch.setattr(title_module, "PaperlessClient", lambda config: fake_paperless)
     monkeypatch.setattr(title_module, "build_ai_client", lambda config: fake_ai)
 
@@ -110,3 +122,17 @@ def test_process_title_recomputes_when_ocr_text_changes(monkeypatch, tmp_path):
     result = title_module.process_title(document_id=1, db_path=db_path)
     assert result == "Titel B"
     assert fake_ai.calls == 2
+
+
+def test_postprocess_strips_quotes_and_enforces_max_length():
+    step_config = StepConfig(
+        name="title",
+        prompt="title.j2",
+        ai_role="title",
+        strip_quotes=True,
+        max_output_length=10,
+    )
+
+    result = title_module._postprocess('  "Ein sehr langer Titel"  \n', step_config)
+
+    assert result == "Ein sehr l"
