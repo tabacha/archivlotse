@@ -128,7 +128,11 @@ providers:
 
   scaleway:
     type: scaleway
-    base_url: "https://api.scaleway.ai/v1"
+    # WICHTIG: Project-ID gehoert als Pfadsegment in die URL, nicht nur
+    # ".../v1" - sonst meldet Scaleway "403 insufficient permissions".
+    # Die komplette URL zeigt dir die Scaleway-Konsole als Code-Beispiel
+    # direkt pro Modell unter "Generative APIs".
+    base_url: "https://api.scaleway.ai/<deine-project-id>/v1"
     # API-Schluessel erzeugen/einsehen: https://console.scaleway.com/iam/api-keys
     # Dort stehen "Access Key" und "Secret Key" genau so beschriftet.
     access_key_id: "SCWxxxxxxxxxxxxxxxxx"
@@ -303,6 +307,11 @@ ARCHIVLOTSE_LOG_LEVEL=DEBUG archivlotse process 6023 --step title --dry-run
   angegebene `provider:`-Name taucht nicht unter `providers:` auf (Tippfehler?).
 - `ValueError: Scaleway provider requires 'secret_key'` → `secret_key`
   beim jeweiligen Scaleway-Provider in `config/ai.yaml` ausfüllen.
+- `403 Forbidden` / `"insufficient permissions to access the resource"`
+  von Scaleway → fast immer, weil in `base_url` die Project-ID im Pfad
+  fehlt (`https://api.scaleway.ai/v1` statt
+  `https://api.scaleway.ai/<project-id>/v1`). Die korrekte URL inkl.
+  Project-ID steht in der Scaleway-Konsole im Code-Beispiel pro Modell.
 - `Unbekannter Verarbeitungsschritt 'title' in config/steps.yaml` →
   `config/steps.yaml` fehlt oder wurde versehentlich verändert/gelöscht.
 - Log-Zeile „KI-Vorschlag ... entspricht keinem vorhandenen Kandidaten,

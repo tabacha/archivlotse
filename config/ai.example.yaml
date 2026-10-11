@@ -16,7 +16,11 @@ providers:
 
   scaleway:
     type: scaleway
-    base_url: "https://api.scaleway.ai/v1"
+    # WICHTIG: die Project-ID gehoert als Pfadsegment in die URL, nicht
+    # nur ".../v1"! Sonst liefert Scaleway "403 insufficient permissions".
+    # Die komplette URL (inkl. deiner Project-ID) zeigt dir die Scaleway-
+    # Konsole direkt als Code-Beispiel pro Modell unter "Generative APIs".
+    base_url: "https://api.scaleway.ai/<deine-project-id>/v1"
     # API-Schluessel erzeugen/einsehen: https://console.scaleway.com/iam/api-keys
     # Dort stehen "Access Key" und "Secret Key" genau so beschriftet. Fuer
     # die Generative APIs wird nur der Secret Key als Bearer-Token benutzt;
