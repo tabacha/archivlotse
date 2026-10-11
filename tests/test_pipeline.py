@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import httpx
+
 import archivlotse.pipeline as pipeline_module
 from archivlotse.ai.base import AIResult
 from archivlotse.config import AIConfig, PaperlessConfig
@@ -495,6 +497,29 @@ def test_process_pipeline_runs_all_steps_in_order_and_survives_a_failure(monkeyp
 
     assert call_order == ["a", "broken", "b"]
     assert results == {"a": "ok:a", "broken": None, "b": "ok:b"}
+
+
+def test_process_pipeline_aborts_immediately_on_missing_document(monkeypatch, tmp_path):
+    call_order = []
+
+    def fake_process_step(step_name, document_id, **kwargs):
+        call_order.append(step_name)
+        if step_name == "a":
+            request = httpx.Request("GET", "http://paperless.example/api/documents/1/")
+            response = httpx.Response(404, request=request)
+            raise httpx.HTTPStatusError("404", request=request, response=response)
+        return f"ok:{step_name}"
+
+    monkeypatch.setattr(pipeline_module, "load_pipeline_order", lambda path: ["a", "b", "c"])
+    monkeypatch.setattr(pipeline_module, "process_step", fake_process_step)
+
+    results = pipeline_module.process_pipeline(document_id=1, db_path=str(tmp_path / "test.db"))
+
+    # "b" und "c" wuerden identisch mit 404 fehlschlagen (Dokument existiert
+    # nicht) - die Pipeline bricht sofort ab, statt das fuer jeden Schritt
+    # einzeln zu wiederholen.
+    assert call_order == ["a"]
+    assert results == {}
 
 
 FAKE_MULTI_CHOICE_STEP_CONFIG = StepConfig(

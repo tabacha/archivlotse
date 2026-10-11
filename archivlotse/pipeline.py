@@ -6,6 +6,7 @@ import re
 import sqlite3
 from typing import Callable
 
+import httpx
 from rapidfuzz import fuzz, process
 
 from .ai.factory import build_ai_client
@@ -271,7 +272,12 @@ def process_pipeline(
 
     A step that raises is logged and skipped rather than aborting the
     rest of the pipeline, so e.g. an unreachable Docling instance for
-    ocr_check doesn't block document_type/title from still running.
+    ocr_check doesn't block document_type/title from still running - with
+    one exception: a 404 fetching the document itself means the document
+    doesn't exist at all, which will fail identically for every remaining
+    step. Rather than repeating the same failure (and a full traceback)
+    once per step, the pipeline aborts immediately with a single clear
+    message.
 
     force=True ignores any cached step_results/candidate_cache entry, so
     every AI/Docling call and every candidate-list fetch happens again,
@@ -292,6 +298,21 @@ def process_pipeline(
                 steps_config_path=steps_config_path,
                 db_path=db_path,
             )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                logger.error(
+                    "Dokument %s existiert nicht in Paperless (404) - Pipeline abgebrochen "
+                    "(restliche Schritte würden identisch fehlschlagen)",
+                    document_id,
+                )
+                break
+            logger.exception(
+                "Dokument %s, Schritt %r: fehlgeschlagen, überspringe und fahre mit dem "
+                "nächsten Schritt fort",
+                document_id,
+                step_name,
+            )
+            results[step_name] = None
         except Exception:
             logger.exception(
                 "Dokument %s, Schritt %r: fehlgeschlagen, überspringe und fahre mit dem "
