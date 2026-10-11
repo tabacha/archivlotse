@@ -25,6 +25,13 @@ def main(argv: list[str] | None = None) -> int:
         "--dry-run", action="store_true", help="Nur berechnen, nicht in Paperless schreiben"
     )
     process_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Ausführliches Logging, inkl. des vollständigen an die KI gesendeten Prompts "
+        "und der rohen Antwort",
+    )
+    process_parser.add_argument(
         "--ai-role",
         default=None,
         help="Modellrolle aus config/ai.yaml; überschreibt die für den Schritt in "
@@ -41,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 1
 
-    setup_logging()
+    setup_logging(verbose=getattr(args, "verbose", False))
 
     if args.command == "process":
         process_step(

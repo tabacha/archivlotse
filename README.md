@@ -287,7 +287,19 @@ sqlite3 data/archivlotse.db "SELECT * FROM step_results;"
 
 ## 7. Mehr Logging bei Problemen
 
-Standardmäßig wird auf Stufe `INFO` geloggt. Für mehr Details:
+Standardmäßig wird auf Stufe `INFO` geloggt. Mit `-v`/`--verbose` siehst
+du zusätzlich den **vollständigen Prompt**, der an die KI geschickt wird
+(inkl. OCR-Text und – beim `document_type`-Schritt – der Kandidatenliste),
+sowie die rohe, noch nicht nachbearbeitete KI-Antwort:
+
+```bash
+archivlotse process 6023 --step document_type --dry-run --verbose
+```
+
+`-v` hebt gezielt nur ArchivLotses eigenes Logging auf `DEBUG` an – die
+sehr geschwätzigen Verbindungsdetails von httpx/httpcore bleiben dabei
+auf `INFO`. Für wirklich alles (inkl. HTTP-Verbindungsdetails) gibt es
+zusätzlich die Umgebungsvariable:
 
 ```bash
 ARCHIVLOTSE_LOG_LEVEL=DEBUG archivlotse process 6023 --step title --dry-run

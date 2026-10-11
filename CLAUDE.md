@@ -27,6 +27,7 @@ pytest tests/test_pipeline.py::test_process_step_is_idempotent_and_audits_only_o
 archivlotse process 6023 --step title --dry-run
 archivlotse process 6023 --step title
 archivlotse process 6023 --step title --ai-role precise  # override the role from config/steps.yaml
+archivlotse process 6023 --step document_type --dry-run --verbose  # also logs the full prompt + raw AI answer at DEBUG
 ```
 
 End users who don't want a dev install can still run the same thing as `python -m archivlotse.cli process ...` from the repo root without `pip install -e .` (only the three runtime deps need to be present). See `README.md` for the beginner-oriented setup walkthrough (venv, config, troubleshooting) — keep that in sync with CLI/config changes made here.

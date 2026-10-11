@@ -138,7 +138,13 @@ def _process_text_step(
             ai_config.provider,
             ai_config.model,
         )
+        logger.debug(
+            "Dokument %s, Schritt %r: vollständiger Prompt:\n%s", document_id, step_config.name, prompt
+        )
         raw_output = ai_client.generate(prompt)
+        logger.debug(
+            "Dokument %s, Schritt %r: rohe KI-Antwort: %r", document_id, step_config.name, raw_output
+        )
         value = _postprocess(raw_output, step_config)
         save_step_result(
             conn,
@@ -240,7 +246,13 @@ def _process_choice_step(
             ai_config.model,
             len(candidates),
         )
+        logger.debug(
+            "Dokument %s, Schritt %r: vollständiger Prompt:\n%s", document_id, step_config.name, prompt
+        )
         raw_output = ai_client.generate(prompt)
+        logger.debug(
+            "Dokument %s, Schritt %r: rohe KI-Antwort: %r", document_id, step_config.name, raw_output
+        )
         suggestion = _postprocess(raw_output, step_config)
         save_step_result(
             conn,
