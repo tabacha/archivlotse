@@ -3,10 +3,15 @@
 Diese Anleitung ist für den Einstieg gedacht: Du brauchst dafür keine
 Vorkenntnisse in Python-Paketierung.
 
-Aktueller Stand: Es gibt bisher **einen** Baustein – er berechnet aus dem
-OCR-Text eines Paperless-Dokuments einen neuen Titel und schreibt ihn
-(optional) zurück nach Paperless. Alles Weitere aus der Projektidee
-(`doc/PROJEKTIDEE.md`) ist noch nicht gebaut.
+Aktueller Stand: ArchivLotse führt generische, in `config/steps.yaml`
+definierte Verarbeitungsschritte aus – ein Schritt liest ein Paperless-Feld
+(z. B. den OCR-Text), lässt ein KI-Modell daraus einen Wert erzeugen und
+schreibt das Ergebnis (optional) in ein anderes Paperless-Feld zurück.
+Bisher ist nur **ein** Schritt definiert: `title` (Titel aus OCR-Text).
+Weitere Schritte lassen sich rein über Config ergänzen (siehe Abschnitt
+3.3) – ohne Python-Code zu ändern. Alles Weitere aus der Projektidee
+(`doc/PROJEKTIDEE.md`, z. B. Klassifizierung, OCR-Verbesserung) ist noch
+nicht gebaut.
 
 ## 1. Voraussetzungen
 
@@ -136,27 +141,37 @@ jeweiligen Umgebungsvariable eingesetzt, falls diese gesetzt ist.
 
 ### 3.3 `config/steps.yaml`
 
-Diese Datei legt pro Verarbeitungsschritt fest, welcher Jinja2-Prompt und
-welche Modellrolle benutzt werden, sowie einfache Vor-/Nachbearbeitung.
-Für den Titel-Schritt ist bereits ein sinnvoller Standard hinterlegt:
+Diese Datei beschreibt jeden Verarbeitungsschritt vollständig – der
+Python-Code selbst weiß nichts über "Titel" oder irgendein anderes Feld,
+das steht ausschließlich hier:
 
 ```yaml
 steps:
   title:
+    source_field: content # Paperless-Feld, das als Eingabetext gelesen wird
+    target_field: title # Paperless-Feld, das mit dem Ergebnis beschrieben wird
+
     prompt: title.j2 # Datei in archivlotse/prompts/
     ai_role: title # Rolle aus config/ai.yaml
 
     preprocessing:
-      max_input_chars: 8000 # OCR-Text wird vorher auf so viele Zeichen gekuerzt
+      max_input_chars: 8000 # Eingabetext wird vorher auf so viele Zeichen gekuerzt
 
     postprocessing:
       strip_quotes: true # Anfuehrungszeichen am Rand entfernen
       max_length: 120 # zur Sicherheit auf max. so viele Zeichen kuerzen
 ```
 
-Du musst hier normalerweise nichts ändern – nur wenn du z. B. einen
-anderen Prompt ausprobieren oder die maximale Titellänge anpassen
-möchtest.
+Für den mitgelieferten Titel-Schritt musst du hier normalerweise nichts
+ändern – nur wenn du z. B. einen anderen Prompt ausprobieren oder die
+maximale Titellänge anpassen möchtest.
+
+**Einen neuen Schritt hinzufügen** geht rein über Config, ohne
+Python-Code zu ändern: eine `.j2`-Prompt-Datei unter `archivlotse/prompts/`
+anlegen, einen neuen Eintrag unter `steps:` ergänzen (mit `source_field`,
+`target_field`, `prompt`, `ai_role`) und bei Bedarf eine passende Rolle in
+`config/ai.yaml`. Der Prompt bekommt den (ggf. gekürzten) Inhalt von
+`source_field` als Variable `{{ input_text }}`.
 
 ## 4. Erster Testlauf (Dry-Run)
 
@@ -166,7 +181,7 @@ Dokuments aus deiner Paperless-Instanz (steht in der Paperless-URL, wenn
 du ein Dokument öffnest).
 
 ```bash
-archivlotse title 6023 --dry-run
+archivlotse process 6023 --step title --dry-run
 ```
 
 Die Ausgabe zeigt unter anderem, welcher Titel vorgeschlagen wird und ob
@@ -179,16 +194,16 @@ Ohne `--dry-run` wird der neue Titel – falls er sich geändert hat –
 tatsächlich in Paperless gespeichert:
 
 ```bash
-archivlotse title 6023
+archivlotse process 6023 --step title
 ```
 
 Führst du den Befehl für dasselbe Dokument ein zweites Mal aus, ohne dass
-sich der OCR-Text, der Prompt oder das Modell geändert haben, wird **keine**
-erneute KI-Anfrage gestellt – ArchivLotse nutzt den gespeicherten Titel aus
-der letzten Berechnung.
+sich der Eingabetext, der Prompt oder das Modell geändert haben, wird
+**keine** erneute KI-Anfrage gestellt – ArchivLotse nutzt das gespeicherte
+Ergebnis aus der letzten Berechnung.
 
 Mit `--ai-role <name>` kannst du eine andere Rolle aus `config/ai.yaml`
-für diesen Lauf benutzen, z. B. `archivlotse title 6023 --ai-role precise`.
+für diesen Lauf benutzen, z. B. `archivlotse process 6023 --step title --ai-role precise`.
 
 ## 6. Wo landen die Daten?
 
@@ -196,17 +211,18 @@ Beim ersten Lauf legt ArchivLotse automatisch eine Datei
 `data/archivlotse.db` an (eine SQLite-Datenbank, also eine einzelne Datei –
 keine separate Serverinstallation nötig). Darin stehen zwei Tabellen:
 
-- `title_results`: jeder berechnete Titel, inkl. verwendetem Modell und
-  Prompt – dient als Cache, damit nichts doppelt berechnet wird.
-- `audit_log`: nur Einträge zu tatsächlich in Paperless geänderten Titeln
-  (Dokument-ID, alter Titel, neuer Titel, Zeitpunkt).
+- `step_results`: jedes berechnete Ergebnis (für jeden Schritt), inkl.
+  verwendetem Modell und Prompt – dient als Cache, damit nichts doppelt
+  berechnet wird.
+- `audit_log`: nur Einträge zu tatsächlich in Paperless geänderten
+  Feldern (Dokument-ID, Feldname, alter Wert, neuer Wert, Zeitpunkt).
 
 Reinschauen kannst du z. B. mit dem `sqlite3`-Kommandozeilenwerkzeug
 (meist schon installiert):
 
 ```bash
 sqlite3 data/archivlotse.db "SELECT * FROM audit_log;"
-sqlite3 data/archivlotse.db "SELECT * FROM title_results;"
+sqlite3 data/archivlotse.db "SELECT * FROM step_results;"
 ```
 
 ## 7. Mehr Logging bei Problemen
@@ -214,7 +230,7 @@ sqlite3 data/archivlotse.db "SELECT * FROM title_results;"
 Standardmäßig wird auf Stufe `INFO` geloggt. Für mehr Details:
 
 ```bash
-ARCHIVLOTSE_LOG_LEVEL=DEBUG archivlotse title 6023 --dry-run
+ARCHIVLOTSE_LOG_LEVEL=DEBUG archivlotse process 6023 --step title --dry-run
 ```
 
 ## 8. Typische Fehler

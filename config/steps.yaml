@@ -1,18 +1,26 @@
-# Fachliche Pipeline-Konfiguration: pro Verarbeitungsschritt, welcher
-# Jinja2-Prompt und welche Modellrolle (aus config/ai.yaml) benutzt wird,
-# sowie einfache Vor-/Nachbearbeitung rund um den KI-Aufruf.
+# Fachliche Pipeline-Konfiguration: pro Verarbeitungsschritt, welches
+# Paperless-Feld gelesen wird, welcher Jinja2-Prompt und welche Modellrolle
+# (aus config/ai.yaml) benutzt wird, welches Feld mit dem Ergebnis
+# beschrieben wird, sowie einfache Vor-/Nachbearbeitung rund um den
+# KI-Aufruf. Der Python-Code kennt "title" o.ae. nicht selbst - das steht
+# ausschliesslich hier.
 #
 # Im Unterschied zu config/paperless.yaml und config/ai.yaml enthaelt diese
 # Datei keine Zugangsdaten und wird daher direkt mit Git versioniert.
 
 steps:
   title:
+    # Paperless-Feld, das als Eingabetext fuer den Prompt gelesen wird.
+    source_field: content
+    # Paperless-Feld, das mit dem Ergebnis beschrieben wird.
+    target_field: title
+
     prompt: title.j2
     ai_role: title
 
     preprocessing:
-      # Laengerer OCR-Text wird vor dem Rendern des Prompts auf so viele
-      # Zeichen gekuerzt.
+      # Laengerer Eingabetext wird vor dem Rendern des Prompts auf so
+      # viele Zeichen gekuerzt.
       max_input_chars: 8000
 
     postprocessing:

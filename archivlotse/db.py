@@ -12,17 +12,18 @@ def init_db(path: str | Path = "data/archivlotse.db") -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS title_results (
+        CREATE TABLE IF NOT EXISTS step_results (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            step_name TEXT NOT NULL,
             document_id INTEGER NOT NULL,
             fingerprint TEXT NOT NULL,
-            title TEXT NOT NULL,
+            output_value TEXT NOT NULL,
             provider TEXT NOT NULL,
             model TEXT NOT NULL,
             prompt_name TEXT NOT NULL,
             prompt_version TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            UNIQUE (document_id, fingerprint)
+            UNIQUE (step_name, document_id, fingerprint)
         )
         """
     )
@@ -31,30 +32,49 @@ def init_db(path: str | Path = "data/archivlotse.db") -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             document_id INTEGER NOT NULL,
-            old_title TEXT,
-            new_title TEXT NOT NULL,
+            field_name TEXT NOT NULL DEFAULT 'title',
+            old_value TEXT,
+            new_value TEXT NOT NULL,
             changed_at TEXT NOT NULL
         )
         """
     )
+    _migrate_legacy_audit_log(conn)
     conn.commit()
     return conn
 
 
-def get_cached_title(
-    conn: sqlite3.Connection, document_id: int, fingerprint: str
+def _migrate_legacy_audit_log(conn: sqlite3.Connection) -> None:
+    """Upgrade an audit_log table created before it became step-generic
+    (old_title/new_title columns, implicitly always about the title
+    field) to the current schema, in place, without losing history."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(audit_log)")}
+    if "old_title" in columns and "old_value" not in columns:
+        conn.execute("ALTER TABLE audit_log RENAME COLUMN old_title TO old_value")
+        conn.execute("ALTER TABLE audit_log RENAME COLUMN new_title TO new_value")
+        columns -= {"old_title", "new_title"}
+        columns |= {"old_value", "new_value"}
+    if "field_name" not in columns:
+        conn.execute(
+            "ALTER TABLE audit_log ADD COLUMN field_name TEXT NOT NULL DEFAULT 'title'"
+        )
+
+
+def get_cached_step_result(
+    conn: sqlite3.Connection, step_name: str, document_id: int, fingerprint: str
 ) -> sqlite3.Row | None:
     return conn.execute(
-        "SELECT * FROM title_results WHERE document_id = ? AND fingerprint = ?",
-        (document_id, fingerprint),
+        "SELECT * FROM step_results WHERE step_name = ? AND document_id = ? AND fingerprint = ?",
+        (step_name, document_id, fingerprint),
     ).fetchone()
 
 
-def save_title_result(
+def save_step_result(
     conn: sqlite3.Connection,
+    step_name: str,
     document_id: int,
     fingerprint: str,
-    title: str,
+    output_value: str,
     provider: str,
     model: str,
     prompt_name: str,
@@ -62,14 +82,16 @@ def save_title_result(
 ) -> None:
     conn.execute(
         """
-        INSERT INTO title_results
-            (document_id, fingerprint, title, provider, model, prompt_name, prompt_version, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO step_results
+            (step_name, document_id, fingerprint, output_value, provider, model,
+             prompt_name, prompt_version, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
+            step_name,
             document_id,
             fingerprint,
-            title,
+            output_value,
             provider,
             model,
             prompt_name,
@@ -81,13 +103,23 @@ def save_title_result(
 
 
 def append_audit_log(
-    conn: sqlite3.Connection, document_id: int, old_title: str | None, new_title: str
+    conn: sqlite3.Connection,
+    document_id: int,
+    field_name: str,
+    old_value: str | None,
+    new_value: str,
 ) -> None:
     conn.execute(
         """
-        INSERT INTO audit_log (document_id, old_title, new_title, changed_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO audit_log (document_id, field_name, old_value, new_value, changed_at)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (document_id, old_title, new_title, datetime.now(timezone.utc).isoformat()),
+        (
+            document_id,
+            field_name,
+            old_value,
+            new_value,
+            datetime.now(timezone.utc).isoformat(),
+        ),
     )
     conn.commit()

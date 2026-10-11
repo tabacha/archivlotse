@@ -18,9 +18,9 @@ class PaperlessClient:
         response.raise_for_status()
         return response.json()
 
-    def update_document_title(self, document_id: int, title: str) -> None:
+    def update_document_field(self, document_id: int, field: str, value: str) -> None:
         response = self._client.patch(
-            f"/api/documents/{document_id}/", json={"title": title}
+            f"/api/documents/{document_id}/", json={field: value}
         )
         response.raise_for_status()
 

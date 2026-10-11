@@ -11,6 +11,8 @@ class StepConfig:
     name: str
     prompt: str
     ai_role: str
+    source_field: str
+    target_field: str
     max_input_chars: int = 8000
     strip_quotes: bool = True
     max_output_length: int | None = None
@@ -19,9 +21,13 @@ class StepConfig:
 def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepConfig:
     """Load the pipeline definition for one processing step.
 
-    Each step in config/steps.yaml names its Jinja2 prompt, the AI role
-    (from config/ai.yaml) it uses, and simple pre-/post-processing rules
-    (input truncation, output cleanup) applied around the AI call.
+    Each step in config/steps.yaml fully describes one field-to-field AI
+    call: which Paperless field to read (source_field), which Jinja2
+    prompt and AI role (from config/ai.yaml) to use, simple pre-/post-
+    processing rules (input truncation, output cleanup), and which
+    Paperless field to write the result to (target_field). The Python
+    pipeline code itself has no knowledge of what "title" or any other
+    specific field/step means - that all lives here.
     """
     data = load_yaml(path)
     steps = data.get("steps", {})
@@ -41,6 +47,8 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
         name=name,
         prompt=step["prompt"],
         ai_role=step["ai_role"],
+        source_field=step["source_field"],
+        target_field=step["target_field"],
         max_input_chars=preprocessing.get("max_input_chars", 8000),
         strip_quotes=postprocessing.get("strip_quotes", True),
         max_output_length=postprocessing.get("max_length"),
