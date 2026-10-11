@@ -448,6 +448,26 @@ Das leert `step_results` und `candidate_cache` vollständig. Das `audit_log`
 (die dauerhafte Historie tatsächlicher Paperless-Änderungen) bleibt
 unangetastet.
 
+### Mehrere Dokumente auf einmal verarbeiten (Batch)
+
+Statt einer einzelnen `document_id` kannst du mit `--tag` alle Dokumente
+verarbeiten, die in Paperless einen bestimmten Tag tragen (z. B. `TODO`
+für "noch zu bearbeiten") – nacheinander, nicht parallel:
+
+```bash
+archivlotse process --tag TODO --dry-run
+archivlotse process --tag TODO
+archivlotse process --tag TODO --step document_type   # nur ein Schritt für alle
+archivlotse process --tag TODO --limit 10              # nur die ersten 10
+```
+
+Scheitert die Verarbeitung eines einzelnen Dokuments (z. B. wegen eines
+unerwarteten Inhalts), wird das geloggt und mit dem nächsten Dokument
+weitergemacht – ein einzelnes Problemdokument bricht nicht den ganzen
+Stapel ab. ArchivLotse fügt den Tag dabei weder hinzu noch entfernt es
+ihn – ob und wie du erledigte Dokumente danach selbst kennzeichnest,
+bleibt dir überlassen.
+
 ## 6. Wo landen die Daten?
 
 Beim ersten Lauf legt ArchivLotse automatisch eine Datei

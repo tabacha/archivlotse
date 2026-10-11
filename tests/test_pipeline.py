@@ -21,7 +21,12 @@ FAKE_STEP_CONFIG = StepConfig(
 
 class FakePaperlessClient:
     def __init__(
-        self, document_types=None, tags=None, correspondents=None, original_bytes=b"%PDF-fake%"
+        self,
+        document_types=None,
+        tags=None,
+        correspondents=None,
+        documents_by_tag=None,
+        original_bytes=b"%PDF-fake%",
     ):
         self.document = {
             "id": 1,
@@ -32,11 +37,13 @@ class FakePaperlessClient:
         self.document_types = document_types or []
         self.tags = tags or []
         self.correspondents = correspondents or []
+        self.documents_by_tag = documents_by_tag or {}
         self.original_bytes = original_bytes
         self.download_calls = 0
         self.list_document_types_calls = 0
         self.list_tags_calls = 0
         self.list_correspondents_calls = 0
+        self.list_documents_by_tag_id_calls: list[int] = []
 
     def __enter__(self):
         return self
@@ -62,6 +69,10 @@ class FakePaperlessClient:
     def list_correspondents(self):
         self.list_correspondents_calls += 1
         return list(self.correspondents)
+
+    def list_documents_by_tag_id(self, tag_id):
+        self.list_documents_by_tag_id_calls.append(tag_id)
+        return list(self.documents_by_tag.get(tag_id, []))
 
     def download_original(self, document_id):
         self.download_calls += 1
@@ -1058,3 +1069,113 @@ def test_correspondent_step_only_passes_plausible_candidates_to_step2(monkeypatc
     # "ACME GmbH" liegt mit Score 32.7 unter fuzzy_review_min_score (80) -
     # wird NICHT an Schritt 2 weitergegeben, nur die beiden Mueller-Kandidaten.
     assert set(captured["correspondent_names"]) == {"Mueller GmbH", "Mueller Handel GmbH"}
+
+
+def _patch_batch_common(monkeypatch, fake_paperless):
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_paperless_config",
+        lambda path: PaperlessConfig(url="http://paperless.example", token="t"),
+    )
+    monkeypatch.setattr(pipeline_module, "PaperlessClient", lambda config: fake_paperless)
+
+
+def test_process_batch_by_tag_runs_pipeline_per_document_in_order(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(
+        tags=TAGS, documents_by_tag={3: [{"id": 10}, {"id": 20}, {"id": 30}]}
+    )
+    _patch_batch_common(monkeypatch, fake_paperless)
+
+    call_order = []
+
+    def fake_process_pipeline(document_id, **kwargs):
+        call_order.append(document_id)
+        return {"title": f"ok:{document_id}"}
+
+    monkeypatch.setattr(pipeline_module, "process_pipeline", fake_process_pipeline)
+
+    results = pipeline_module.process_batch_by_tag(
+        tag_name="TODO", db_path=str(tmp_path / "test.db")
+    )
+
+    assert fake_paperless.list_documents_by_tag_id_calls == [3]  # ID von "TODO"
+    assert call_order == [10, 20, 30]
+    assert results == {10: {"title": "ok:10"}, 20: {"title": "ok:20"}, 30: {"title": "ok:30"}}
+
+
+def test_process_batch_by_tag_uses_single_step_when_given(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(tags=TAGS, documents_by_tag={3: [{"id": 10}]})
+    _patch_batch_common(monkeypatch, fake_paperless)
+
+    captured = {}
+
+    def fake_process_step(**kwargs):
+        captured.update(kwargs)
+        return "ok"
+
+    monkeypatch.setattr(pipeline_module, "process_step", fake_process_step)
+
+    pipeline_module.process_batch_by_tag(
+        tag_name="TODO", step_name="title", ai_role="precise", db_path=str(tmp_path / "test.db")
+    )
+
+    assert captured["step_name"] == "title"
+    assert captured["document_id"] == 10
+    assert captured["ai_role"] == "precise"
+
+
+def test_process_batch_by_tag_continues_after_one_document_fails(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(
+        tags=TAGS, documents_by_tag={3: [{"id": 10}, {"id": 20}, {"id": 30}]}
+    )
+    _patch_batch_common(monkeypatch, fake_paperless)
+
+    call_order = []
+
+    def fake_process_pipeline(document_id, **kwargs):
+        call_order.append(document_id)
+        if document_id == 20:
+            raise RuntimeError("boom")
+        return {"title": f"ok:{document_id}"}
+
+    monkeypatch.setattr(pipeline_module, "process_pipeline", fake_process_pipeline)
+
+    results = pipeline_module.process_batch_by_tag(
+        tag_name="TODO", db_path=str(tmp_path / "test.db")
+    )
+
+    assert call_order == [10, 20, 30]
+    assert results == {10: {"title": "ok:10"}, 20: None, 30: {"title": "ok:30"}}
+
+
+def test_process_batch_by_tag_respects_limit(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(
+        tags=TAGS, documents_by_tag={3: [{"id": 10}, {"id": 20}, {"id": 30}]}
+    )
+    _patch_batch_common(monkeypatch, fake_paperless)
+
+    call_order = []
+    monkeypatch.setattr(
+        pipeline_module,
+        "process_pipeline",
+        lambda document_id, **kwargs: call_order.append(document_id),
+    )
+
+    pipeline_module.process_batch_by_tag(
+        tag_name="TODO", limit=2, db_path=str(tmp_path / "test.db")
+    )
+
+    assert call_order == [10, 20]
+
+
+def test_process_batch_by_tag_raises_for_unknown_tag(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(tags=TAGS)
+    _patch_batch_common(monkeypatch, fake_paperless)
+
+    try:
+        pipeline_module.process_batch_by_tag(
+            tag_name="GibtEsNicht", db_path=str(tmp_path / "test.db")
+        )
+        assert False, "sollte ValueError auslösen"
+    except ValueError as exc:
+        assert "GibtEsNicht" in str(exc)

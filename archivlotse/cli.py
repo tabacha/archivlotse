@@ -4,7 +4,7 @@ import argparse
 import sys
 
 from .logging_config import setup_logging
-from .pipeline import clear_cache, process_pipeline, process_step
+from .pipeline import clear_cache, process_batch_by_tag, process_pipeline, process_step
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -14,9 +14,28 @@ def main(argv: list[str] | None = None) -> int:
     process_parser = subparsers.add_parser(
         "process",
         help="Einen Verarbeitungsschritt (oder, ohne --step, die ganze Pipeline) für ein "
-        "Dokument ausführen",
+        "Dokument oder (mit --tag) für alle Dokumente mit einem bestimmten Tag ausführen",
     )
-    process_parser.add_argument("document_id", type=int)
+    process_parser.add_argument(
+        "document_id",
+        type=int,
+        nargs="?",
+        default=None,
+        help="Paperless-Dokument-ID. Zusammen mit --tag weglassen.",
+    )
+    process_parser.add_argument(
+        "--tag",
+        default=None,
+        help="Statt einer einzelnen document_id: alle Dokumente mit diesem Paperless-Tag "
+        "(z.B. 'TODO') nacheinander verarbeiten. Fügt/entfernt den Tag selbst NICHT - "
+        "das bleibt eine eigene, bewusste Entscheidung.",
+    )
+    process_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Nur zusammen mit --tag: höchstens so viele Dokumente verarbeiten",
+    )
     process_parser.add_argument(
         "--step",
         default=None,
@@ -72,9 +91,29 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "clear-cache":
         clear_cache(db_path=args.db)
     elif args.command == "process":
-        if args.step is None:
-            if args.ai_role is not None:
-                parser.error("--ai-role kann nur zusammen mit --step benutzt werden")
+        if args.tag is not None and args.document_id is not None:
+            parser.error("document_id und --tag schließen sich aus")
+        if args.tag is None and args.document_id is None:
+            parser.error("entweder document_id oder --tag angeben")
+        if args.limit is not None and args.tag is None:
+            parser.error("--limit kann nur zusammen mit --tag benutzt werden")
+        if args.ai_role is not None and args.step is None:
+            parser.error("--ai-role kann nur zusammen mit --step benutzt werden")
+
+        if args.tag is not None:
+            process_batch_by_tag(
+                tag_name=args.tag,
+                step_name=args.step,
+                ai_role=args.ai_role,
+                dry_run=args.dry_run,
+                force=args.force,
+                limit=args.limit,
+                paperless_config_path=args.paperless_config,
+                ai_config_path=args.ai_config,
+                steps_config_path=args.steps_config,
+                db_path=args.db,
+            )
+        elif args.step is None:
             process_pipeline(
                 document_id=args.document_id,
                 dry_run=args.dry_run,

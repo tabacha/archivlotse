@@ -39,6 +39,11 @@ archivlotse process 6023 --step title --force  # bypass step/candidate caches, r
 archivlotse process 6023 --dry-run
 archivlotse process 6023
 
+# Batch mode: run for every document tagged "TODO", one after another
+# (does NOT add/remove the tag itself - that's a separate decision)
+archivlotse process --tag TODO --dry-run
+archivlotse process --tag TODO --step document_type --limit 10
+
 # Wipe all cached step results + candidate lists (NOT the audit log)
 archivlotse clear-cache
 ```
@@ -71,6 +76,8 @@ Processing (`process_step` in `archivlotse/pipeline.py`) dispatches on `step_con
 - `archivlotse clear-cache` (`archivlotse/db.py: clear_caches`) empties `step_results` and `candidate_cache` entirely, in one shot (no per-step/per-document granularity) — for when Paperless metadata (e.g. tags) was reorganized and stale cached suggestions shouldn't linger until their TTL/fingerprint naturally expires. Never touches `audit_log`.
 
 `process_pipeline` (new) loads `pipeline:` via `load_pipeline_order` and calls `process_step` for each name in order, catching and logging (not re-raising) any exception per step so e.g. an unreachable Docling doesn't block `document_type`/`title`. Each step still does its own fresh `paperless.get_document()`, so a later step sees an earlier step's actual Paperless write — except in `--dry-run`, where nothing is written, so later steps keep seeing pre-pipeline state (documented caveat, not a bug).
+
+`process_batch_by_tag` (`archivlotse process --tag <name> [--limit N] [--step ...]`) resolves the tag name to its Paperless id via the cached `_get_candidates(conn, paperless, "tags")`, fetches every document with that tag (`PaperlessClient.list_documents_by_tag_id`), then calls `process_pipeline` (or `process_step` if `--step` is given) for each one in turn, in whatever order Paperless returns them. A document that raises is logged and skipped, same isolation principle as a failing step within one document's pipeline — one bad document must not abort the whole batch. Deliberately does **not** add or remove the tag itself on any document (e.g. a "done, remove TODO" step) — that's a separate decision, not assumed here.
 
 **OCR heuristic calibration note** (see `ocr_quality.py` for the full docstring): tested against real documents, a plain "fraction of alphabetic tokens length≥3" heuristic, a longest-good-run heuristic, and a vowel-presence heuristic all failed to reliably separate genuinely garbled OCR from fine-but-numeric-heavy documents (bank statements) or fine-but-noisy-header documents (barcode/address-block lines). The shipped heuristic uses `wordfreq.zipf_frequency(word, "de") >= 4.0` as the "is this a real word" test, which calibrated reasonably (known-bad document ~0.47, known-good documents 0.74–0.92) — but a **re-OCR'd, jargon/proper-noun-heavy document can still score lower than its own garbled original** (verified live against a vehicle registration certificate), so old-vs-new score comparison is not used for the accept/reject decision, only the initial "is the existing text good enough to skip re-OCR" gate.
 
@@ -110,7 +117,7 @@ Guiding principle: **as little AI as necessary, as much traceability as possible
 archivlotse process 6023 --dry-run          # implemented: whole pipeline
 archivlotse process 6023 --step title       # implemented: single step
 archivlotse process 6023 --step document_date  # not implemented (no such step yet)
-archivlotse process --tag ki-test --limit 10   # not implemented (no bulk/tag selection yet)
+archivlotse process --tag TODO --limit 10      # implemented: batch mode, see process_batch_by_tag
 archivlotse status 6023                         # not implemented
 archivlotse audit 6023                          # not implemented (query data/archivlotse.db directly for now)
 ```
