@@ -6,6 +6,13 @@ import httpx
 
 from .config import PaperlessConfig
 
+# Paperless's default page size is 25, which turns listing a few hundred
+# correspondents into dozens of round trips (~2 minutes measured live
+# against a ~1000-correspondent instance). Requesting a much larger page
+# size up front collapses that into a single request in practice, while
+# _list_all still follows "next" links for anything beyond this.
+_LIST_PAGE_SIZE = 1000
+
 
 class PaperlessClient:
     def __init__(self, config: PaperlessConfig, timeout: float = 30.0):
@@ -32,22 +39,28 @@ class PaperlessClient:
     def list_document_types(self) -> list[dict]:
         """Fetch all document types configured in Paperless, following
         pagination, each as {"id": ..., "name": ..., ...}."""
-        return self._list_all("/api/document_types/")
+        return self._list_all("/api/document_types/", params={"page_size": _LIST_PAGE_SIZE})
 
     def list_tags(self) -> list[dict]:
         """Fetch all tags configured in Paperless, following pagination,
         each as {"id": ..., "name": ..., ...}."""
-        return self._list_all("/api/tags/")
+        return self._list_all("/api/tags/", params={"page_size": _LIST_PAGE_SIZE})
 
     def list_correspondents(self) -> list[dict]:
         """Fetch all correspondents configured in Paperless, following
-        pagination, each as {"id": ..., "name": ..., ...}."""
-        return self._list_all("/api/correspondents/")
+        pagination, each as {"id": ..., "name": ..., ...}. Paperless's
+        default page size (25) would mean ~20+ round trips for an
+        instance with hundreds of correspondents (~2 minutes measured
+        live); requesting _LIST_PAGE_SIZE at once cuts that to a single
+        request in practice."""
+        return self._list_all("/api/correspondents/", params={"page_size": _LIST_PAGE_SIZE})
 
     def list_documents_by_tag_id(self, tag_id: int) -> list[dict]:
         """Fetch all documents (id, title, ...) tagged with the given tag
         id, following pagination."""
-        return self._list_all(f"/api/documents/?tags__id={tag_id}")
+        return self._list_all(
+            "/api/documents/", params={"tags__id": tag_id, "page_size": _LIST_PAGE_SIZE}
+        )
 
     def download_original(self, document_id: int) -> bytes:
         """Fetch the original (unmodified) document file."""
@@ -55,11 +68,17 @@ class PaperlessClient:
         response.raise_for_status()
         return response.content
 
-    def _list_all(self, path: str) -> list[dict]:
+    def _list_all(self, path: str, params: dict | None = None) -> list[dict]:
+        """Follow pagination from `path`, starting with `params` (only
+        applied to the first request - a "next" link is already a full
+        absolute URL with all query params, including page_size, baked
+        in by Paperless itself)."""
         results: list[dict] = []
         url: str | None = path
+        first_request = True
         while url:
-            response = self._client.get(url)
+            response = self._client.get(url, params=params if first_request else None)
+            first_request = False
             response.raise_for_status()
             data = response.json()
             results.extend(data["results"])
