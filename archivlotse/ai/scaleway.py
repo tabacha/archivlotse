@@ -5,13 +5,17 @@ import httpx
 
 class OpenAICompatibleClient:
     """Chat-completion client for Scaleway Model-as-a-Service and other
-    OpenAI-compatible APIs."""
+    OpenAI-compatible APIs.
 
-    def __init__(self, base_url: str, model: str, api_key: str, timeout: float = 120.0):
+    Scaleway's Generative APIs authenticate with the Secret Key half of
+    an IAM API key pair (sent as a Bearer token); the Access Key ID is
+    not needed for this endpoint, only kept in config for reference."""
+
+    def __init__(self, base_url: str, model: str, secret_key: str, timeout: float = 120.0):
         self._model = model
         self._client = httpx.Client(
             base_url=base_url,
-            headers={"Authorization": f"Bearer {api_key}"},
+            headers={"Authorization": f"Bearer {secret_key}"},
             timeout=timeout,
         )
 

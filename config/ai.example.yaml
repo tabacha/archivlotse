@@ -1,8 +1,8 @@
 # Kopieren nach ai.yaml und anpassen.
 #
 # 1) Unter "providers" einmal pro Backend die Zugangsdaten eintragen,
-#    z.B. ein lokales Ollama und einen Cloud-Dienst wie Scaleway.
-#    Ein API-Key steht hier nur EINMAL pro Provider, auch wenn mehrere
+#    z.B. ein lokales Ollama und einen Cloud-Dienst wie Scaleway. Die
+#    Zugangsdaten stehen hier nur EINMAL pro Provider, auch wenn mehrere
 #    Rollen weiter unten denselben Cloud-Dienst benutzen.
 #
 # 2) Unter "roles" pro logischer Aufgabe festlegen, welcher Provider und
@@ -17,7 +17,12 @@ providers:
   scaleway:
     type: scaleway
     base_url: "https://api.scaleway.ai/v1"
-    api_key: "${SCALEWAY_API_KEY}"
+    # API-Schluessel erzeugen/einsehen: https://console.scaleway.com/iam/api-keys
+    # Dort stehen "Access Key" und "Secret Key" genau so beschriftet. Fuer
+    # die Generative APIs wird nur der Secret Key als Bearer-Token benutzt;
+    # die Access Key ID steht hier nur zur eigenen Zuordnung/Referenz.
+    access_key_id: "SCWxxxxxxxxxxxxxxxxx"
+    secret_key: "${SCALEWAY_SECRET_KEY}"
 
 roles:
   title:

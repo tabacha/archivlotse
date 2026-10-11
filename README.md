@@ -111,14 +111,14 @@ Diese Datei hat zwei Abschnitte:
 
 - **`providers:`** – hier trägst du einmal pro KI-Backend die
   Zugangsdaten ein (z. B. ein lokales Ollama und einen Cloud-Dienst wie
-  Scaleway). Ein API-Key steht hier nur **einmal** pro Provider.
+  Scaleway). Die Zugangsdaten stehen hier nur **einmal** pro Provider.
 - **`roles:`** – hier legst du pro Aufgabe ("Rolle") fest, welcher
   Provider und welches Modell benutzt wird. Der Titel-Schritt benutzt die
   Rolle `title`. Mehrere Rollen können sich denselben Provider (und damit
-  denselben API-Key) teilen, ohne ihn zu wiederholen.
+  dieselben Zugangsdaten) teilen, ohne sie zu wiederholen.
 
 Beispiel: ein Modell läuft lokal über Ollama, ein anderes in der Cloud
-über Scaleway – der Scaleway-Key steht dabei nur einmal:
+über Scaleway – die Scaleway-Zugangsdaten stehen dabei nur einmal:
 
 ```yaml
 providers:
@@ -129,7 +129,10 @@ providers:
   scaleway:
     type: scaleway
     base_url: "https://api.scaleway.ai/v1"
-    api_key: "${SCALEWAY_API_KEY}"
+    # API-Schluessel erzeugen/einsehen: https://console.scaleway.com/iam/api-keys
+    # Dort stehen "Access Key" und "Secret Key" genau so beschriftet.
+    access_key_id: "SCWxxxxxxxxxxxxxxxxx"
+    secret_key: "${SCALEWAY_SECRET_KEY}"
 
 roles:
   title:
@@ -151,8 +154,13 @@ Aufruf überschreiben (siehe unten, `--ai-role`) – Standard ist `title`.
 
 Statt Zugangsdaten direkt in die Datei zu schreiben, kannst du auch
 Umgebungsvariablen benutzen, z. B. `token: "${PAPERLESS_TOKEN}"` oder
-`api_key: "${SCALEWAY_API_KEY}"` – dann wird beim Start der Wert aus der
-jeweiligen Umgebungsvariable eingesetzt, falls diese gesetzt ist.
+`secret_key: "${SCALEWAY_SECRET_KEY}"` – dann wird beim Start der Wert
+aus der jeweiligen Umgebungsvariable eingesetzt, falls diese gesetzt ist.
+
+Für die Scaleway Generative APIs wird nur der **Secret Key** tatsächlich
+für die Anmeldung gebraucht (als Bearer-Token); die **Access Key ID**
+steht nur zur eigenen Zuordnung mit im Provider-Eintrag und wird sonst
+nirgends verwendet.
 
 ### 3.3 `config/steps.yaml`
 
@@ -293,8 +301,8 @@ ARCHIVLOTSE_LOG_LEVEL=DEBUG archivlotse process 6023 --step title --dry-run
   Standard-Rolle `title`) fehlt unter `roles:` in `config/ai.yaml`.
 - `Rolle ... verweist auf unbekannten Provider ...` → der unter `roles:`
   angegebene `provider:`-Name taucht nicht unter `providers:` auf (Tippfehler?).
-- `ValueError: Scaleway provider requires 'api_key'` → `api_key` beim
-  jeweiligen Scaleway-Provider in `config/ai.yaml` ausfüllen.
+- `ValueError: Scaleway provider requires 'secret_key'` → `secret_key`
+  beim jeweiligen Scaleway-Provider in `config/ai.yaml` ausfüllen.
 - `Unbekannter Verarbeitungsschritt 'title' in config/steps.yaml` →
   `config/steps.yaml` fehlt oder wurde versehentlich verändert/gelöscht.
 - Log-Zeile „KI-Vorschlag ... entspricht keinem vorhandenen Kandidaten,

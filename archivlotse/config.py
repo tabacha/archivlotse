@@ -18,7 +18,8 @@ class AIConfig:
     provider: str
     base_url: str
     model: str
-    api_key: str | None = None
+    access_key_id: str | None = None
+    secret_key: str | None = None
 
 
 def load_yaml(path: str | Path) -> dict:
@@ -36,9 +37,9 @@ def load_ai_roles(path: str | Path = "config/ai.yaml") -> dict[str, AIConfig]:
     """Load all model roles from config/ai.yaml.
 
     The file defines reusable "providers" (connection details, incl. any
-    API key) once, and "roles" (logical tasks like "title") that each pick
-    a provider + model. This way a cloud API key is only ever written
-    once, even if several roles use it with different models.
+    credentials) once, and "roles" (logical tasks like "title") that each
+    pick a provider + model. This way cloud credentials are only ever
+    written once, even if several roles use them with different models.
     """
     data = load_yaml(path)
     providers = data.get("providers", {})
@@ -58,7 +59,8 @@ def load_ai_roles(path: str | Path = "config/ai.yaml") -> dict[str, AIConfig]:
             provider=provider["type"],
             base_url=provider["base_url"].rstrip("/"),
             model=role["model"],
-            api_key=provider.get("api_key"),
+            access_key_id=provider.get("access_key_id"),
+            secret_key=provider.get("secret_key"),
         )
     return roles
 
