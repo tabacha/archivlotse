@@ -25,6 +25,12 @@ class AIConfig:
     # gerechnet - diese Felder sind nur fuer Cloud-Provider relevant.
     price_per_1m_input: float | None = None
     price_per_1m_output: float | None = None
+    # Wie lange (Sekunden) auf eine Antwort gewartet wird, bevor der
+    # Request abgebrochen wird. Lokales Ollama (insb. CPU-Inferenz oder
+    # ein "kaltes", noch nicht geladenes Modell) kann deutlich laenger
+    # brauchen als ein Cloud-Dienst - pro Provider in config/ai.yaml
+    # einstellbar statt hartcodiert.
+    timeout: float = 120.0
 
 
 def load_yaml(path: str | Path) -> dict:
@@ -68,6 +74,7 @@ def load_ai_roles(path: str | Path = "config/ai.yaml") -> dict[str, AIConfig]:
             secret_key=provider.get("secret_key"),
             price_per_1m_input=role.get("price_per_1m_input"),
             price_per_1m_output=role.get("price_per_1m_output"),
+            timeout=provider.get("timeout", 120.0),
         )
     return roles
 

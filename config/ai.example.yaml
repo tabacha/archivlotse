@@ -13,6 +13,11 @@ providers:
   ollama_lokal:
     type: ollama
     base_url: "http://127.0.0.1:11434"
+    # Wie lange (Sekunden) auf eine Antwort gewartet wird, bevor der
+    # Request abbricht - Standard 120s. Lokale Inferenz (CPU, oder ein
+    # noch nicht geladenes/"kaltes" Modell) kann deutlich laenger
+    # brauchen, deshalb hier optional pro Provider erhoehbar.
+    timeout: 300
 
   scaleway:
     type: scaleway
