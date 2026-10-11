@@ -6,7 +6,7 @@ Vorkenntnisse in Python-Paketierung.
 Aktueller Stand: ArchivLotse führt generische, in `config/steps.yaml`
 definierte Verarbeitungsschritte aus – ein Schritt liest ein Paperless-Feld
 (z. B. den OCR-Text), ermittelt daraus einen Wert und schreibt ihn
-(optional) in ein anderes Paperless-Feld zurück. Es gibt drei Arten von
+(optional) in ein anderes Paperless-Feld zurück. Es gibt vier Arten von
 Schritten:
 
 - **Freitext-Schritte** wie `title`: die KI erzeugt frei formulierten Text
@@ -15,6 +15,11 @@ Schritten:
   einen von mehreren **bereits in Paperless vorhandenen** Werten
   entscheiden (hier: einen Dokumenttyp). Ein Vorschlag, der zu keinem
   vorhandenen Dokumenttyp passt, wird verworfen und **nicht** gespeichert.
+- **Mehrfachauswahl-Schritte** wie `tags`: wie ein Auswahl-Schritt, aber
+  die KI darf mehrere vorhandene Werte vorschlagen (ein Dokument kann
+  mehrere Tags haben). Ungültige Einzelvorschläge werden nur einzeln
+  verworfen; gültige werden zu den vorhandenen Werten **hinzugefügt**,
+  nie entfernt.
 - **OCR-Qualitätsschritt** `ocr_check`: kein KI-Aufruf, sondern eine
   Heuristik schätzt, ob der vorhandene Text brauchbar ist; falls nicht,
   wird das Originaldokument über eine lokale Docling-Serve-Instanz neu
@@ -23,12 +28,14 @@ Schritten:
 Mehrere Schritte lassen sich zu einer **Pipeline** verketten (Reihenfolge
 in `pipeline:` in `config/steps.yaml`); `archivlotse process <id>` ohne
 `--step` führt sie alle der Reihe nach aus, jeder Schritt sieht dabei die
-(echten, nicht Dry-Run-) Änderungen der vorherigen Schritte.
+(echten, nicht Dry-Run-) Änderungen der vorherigen Schritte. Kandidatenlisten
+(Dokumenttypen, Tags, …) werden 2 Stunden lang zwischengespeichert, damit
+nicht jeder Schritt sie erneut von Paperless laden muss.
 
 Weitere Freitext-Schritte lassen sich rein über Config ergänzen (siehe
-Abschnitt 3.3) – ohne Python-Code zu ändern; ein weiterer Auswahl-Schritt
-(z. B. für Korrespondenten oder Tags) braucht zusätzlich eine kleine
-Codeänderung (eine neue Zeile in `CANDIDATE_FETCHERS` in
+Abschnitt 3.3) – ohne Python-Code zu ändern; ein weiterer Auswahl- oder
+Mehrfachauswahl-Schritt (z. B. für Korrespondenten) braucht zusätzlich
+eine kleine Codeänderung (eine neue Zeile in `CANDIDATE_FETCHERS` in
 `archivlotse/pipeline.py`). Alles Weitere aus der Projektidee
 (`doc/PROJEKTIDEE.md`, z. B. Custom Fields) ist noch nicht gebaut.
 
@@ -190,6 +197,7 @@ das steht ausschließlich hier:
 pipeline:
   - ocr_check
   - document_type
+  - tags
   - title
 
 steps:
@@ -278,6 +286,39 @@ keiner passt. Geschrieben wird in Paperless die **ID** des passenden
 Dokumenttyps (`document_type` erwartet in der API eine ID, keinen Namen);
 im Audit-Log stehen aber die lesbaren Namen, nicht die IDs.
 
+**Mehrfachauswahl-Schritt `tags`:** wie `document_type`, aber mit `multi:
+true` – die KI darf mehrere, durch Komma getrennte Tags vorschlagen:
+
+```yaml
+  tags:
+    source_field: content
+    target_field: tags
+
+    prompt: tags.j2
+    ai_role: tags
+
+    candidates_endpoint: tags
+    multi: true # Mehrfachauswahl statt genau eines Werts
+
+    preprocessing:
+      max_input_chars: 8000
+
+    postprocessing:
+      strip_quotes: true
+      max_length: 500
+```
+
+Unterschiede zum einfachen Auswahl-Schritt:
+
+- Die KI antwortet mit einer kommagetrennten Liste (z. B. `"Auto,
+  Rechnung"`) oder `KEINE`, wenn kein Tag passt.
+- Jeder einzelne Vorschlag wird für sich geprüft – ein ungültiger
+  Einzelvorschlag wird nur ignoriert (mit Log-Warnung), nicht der ganze
+  Schritt verworfen.
+- Gültige Vorschläge werden zu den **bereits vorhandenen** Tags des
+  Dokuments hinzugefügt. Vorhandene Tags werden **nie entfernt** – so
+  gehen manuell gesetzte Tags nicht verloren.
+
 **OCR-Qualitätsschritt `ocr_check`:** kein `prompt`/`ai_role` nötig, da
 kein KI-Aufruf stattfindet:
 
@@ -362,13 +403,18 @@ für diesen Lauf benutzen, z. B. `archivlotse process 6023 --step title --ai-rol
 
 Beim ersten Lauf legt ArchivLotse automatisch eine Datei
 `data/archivlotse.db` an (eine SQLite-Datenbank, also eine einzelne Datei –
-keine separate Serverinstallation nötig). Darin stehen zwei Tabellen:
+keine separate Serverinstallation nötig). Darin stehen drei Tabellen:
 
 - `step_results`: jedes berechnete Ergebnis (für jeden Schritt), inkl.
   verwendetem Modell und Prompt – dient als Cache, damit nichts doppelt
   berechnet wird.
 - `audit_log`: nur Einträge zu tatsächlich in Paperless geänderten
   Feldern (Dokument-ID, Feldname, alter Wert, neuer Wert, Zeitpunkt).
+- `candidate_cache`: zwischengespeicherte Kandidatenlisten (Dokumenttypen,
+  Tags) für Auswahl-/Mehrfachauswahl-Schritte, 2 Stunden gültig. Ändert
+  sich ein Tag/Dokumenttyp in Paperless, kann es bis zu 2 Stunden dauern,
+  bis ArchivLotse das bemerkt – zum sofortigen Erzwingen einfach die Zeile
+  löschen: `sqlite3 data/archivlotse.db "DELETE FROM candidate_cache;"`.
 
 Reinschauen kannst du z. B. mit dem `sqlite3`-Kommandozeilenwerkzeug
 (meist schon installiert):
@@ -376,6 +422,7 @@ Reinschauen kannst du z. B. mit dem `sqlite3`-Kommandozeilenwerkzeug
 ```bash
 sqlite3 data/archivlotse.db "SELECT * FROM audit_log;"
 sqlite3 data/archivlotse.db "SELECT * FROM step_results;"
+sqlite3 data/archivlotse.db "SELECT endpoint, fetched_at FROM candidate_cache;"
 ```
 
 ## 7. Mehr Logging bei Problemen

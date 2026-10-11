@@ -17,7 +17,7 @@ FAKE_STEP_CONFIG = StepConfig(
 
 
 class FakePaperlessClient:
-    def __init__(self, document_types=None, original_bytes=b"%PDF-fake%"):
+    def __init__(self, document_types=None, tags=None, original_bytes=b"%PDF-fake%"):
         self.document = {
             "id": 1,
             "title": "Alter Titel",
@@ -25,8 +25,11 @@ class FakePaperlessClient:
         }
         self.update_calls: list[tuple[str, object]] = []
         self.document_types = document_types or []
+        self.tags = tags or []
         self.original_bytes = original_bytes
         self.download_calls = 0
+        self.list_document_types_calls = 0
+        self.list_tags_calls = 0
 
     def __enter__(self):
         return self
@@ -42,7 +45,12 @@ class FakePaperlessClient:
         self.document[field] = value
 
     def list_document_types(self):
+        self.list_document_types_calls += 1
         return list(self.document_types)
+
+    def list_tags(self):
+        self.list_tags_calls += 1
+        return list(self.tags)
 
     def download_original(self, document_id):
         self.download_calls += 1
@@ -438,3 +446,98 @@ def test_process_pipeline_runs_all_steps_in_order_and_survives_a_failure(monkeyp
 
     assert call_order == ["a", "broken", "b"]
     assert results == {"a": "ok:a", "broken": None, "b": "ok:b"}
+
+
+FAKE_MULTI_CHOICE_STEP_CONFIG = StepConfig(
+    name="tags",
+    prompt="tags.j2",
+    ai_role="tags",
+    source_field="content",
+    target_field="tags",
+    candidates_endpoint="tags",
+    multi=True,
+)
+
+TAGS = [
+    {"id": 1, "name": "Auto"},
+    {"id": 2, "name": "Rechnung"},
+    {"id": 3, "name": "TODO"},
+]
+
+
+def _patch_multi_choice_common(monkeypatch, fake_paperless, fake_ai):
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_paperless_config",
+        lambda path: PaperlessConfig(url="http://paperless.example", token="t"),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_ai_config",
+        lambda role, path: AIConfig(provider="scaleway", base_url="http://scaleway.example", model="m"),
+    )
+    monkeypatch.setattr(
+        pipeline_module, "load_step_config", lambda name, path: FAKE_MULTI_CHOICE_STEP_CONFIG
+    )
+    monkeypatch.setattr(pipeline_module, "PaperlessClient", lambda config: fake_paperless)
+    monkeypatch.setattr(pipeline_module, "build_ai_client", lambda config: fake_ai)
+
+
+def test_multi_choice_step_adds_valid_tags_and_drops_invalid_ones(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(tags=TAGS)
+    fake_paperless.document["tags"] = [3]  # bereits "TODO"
+    fake_ai = FakeAIClient(title="Auto, Rechnung, Erfundener Tag")
+    _patch_multi_choice_common(monkeypatch, fake_paperless, fake_ai)
+
+    result = pipeline_module.process_step(
+        step_name="tags", document_id=1, db_path=str(tmp_path / "test.db")
+    )
+
+    assert result is not None
+    assert fake_paperless.update_calls == [("tags", [1, 2, 3])]  # Auto, Rechnung, TODO
+
+    conn = pipeline_module.init_db(str(tmp_path / "test.db"))
+    audit_rows = conn.execute("SELECT * FROM audit_log").fetchall()
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["field_name"] == "tags"
+
+
+def test_multi_choice_step_keeps_existing_tags_when_none_match(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(tags=TAGS)
+    fake_paperless.document["tags"] = [3]  # "TODO"
+    fake_ai = FakeAIClient(title="KEINE")
+    _patch_multi_choice_common(monkeypatch, fake_paperless, fake_ai)
+
+    result = pipeline_module.process_step(
+        step_name="tags", document_id=1, db_path=str(tmp_path / "test.db")
+    )
+
+    assert result is not None
+    assert fake_paperless.update_calls == []  # unveraendert, "TODO" bleibt
+
+
+def test_multi_choice_step_is_idempotent(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(tags=TAGS)
+    fake_ai = FakeAIClient(title="Auto")
+    _patch_multi_choice_common(monkeypatch, fake_paperless, fake_ai)
+
+    db_path = str(tmp_path / "test.db")
+    pipeline_module.process_step(step_name="tags", document_id=1, db_path=db_path)
+    assert fake_ai.calls == 1
+
+    pipeline_module.process_step(step_name="tags", document_id=1, db_path=db_path)
+    assert fake_ai.calls == 1  # zweiter Lauf nutzt den Cache
+
+
+def test_candidate_lists_are_cached_across_calls(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(tags=TAGS)
+    fake_ai = FakeAIClient(title="Auto")
+    _patch_multi_choice_common(monkeypatch, fake_paperless, fake_ai)
+
+    db_path = str(tmp_path / "test.db")
+    pipeline_module.process_step(step_name="tags", document_id=1, db_path=db_path)
+    pipeline_module.process_step(step_name="tags", document_id=1, db_path=db_path)
+
+    # Zwei komplette Prozessdurchlaeufe, aber die Tag-Liste wird nur einmal
+    # tatsaechlich von Paperless geholt (Cache greift beim zweiten Mal).
+    assert fake_paperless.list_tags_calls == 1

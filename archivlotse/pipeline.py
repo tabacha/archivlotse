@@ -7,7 +7,14 @@ from typing import Callable
 
 from .ai.factory import build_ai_client
 from .config import AIConfig, load_ai_config, load_paperless_config
-from .db import append_audit_log, get_cached_step_result, init_db, save_step_result
+from .db import (
+    append_audit_log,
+    get_cached_candidates,
+    get_cached_step_result,
+    init_db,
+    save_candidates,
+    save_step_result,
+)
 from .docling import DoclingClient
 from .ocr_quality import ocr_quality_score
 from .paperless import PaperlessClient
@@ -16,15 +23,27 @@ from .steps import StepConfig, load_pipeline_order, load_step_config
 
 logger = logging.getLogger(__name__)
 
-# Answer the AI is instructed to give (see archivlotse/prompts/document_type.j2)
-# when none of the offered candidates fits - handled the same as a rejected
-# suggestion (nothing is written back), but logged as an expected outcome
-# rather than a validation failure.
+# Answer the AI is instructed to give (see config/prompts/document_type.j2)
+# for a single-choice step when none of the offered candidates fits -
+# handled the same as a rejected suggestion (nothing is written back), but
+# logged as an expected outcome rather than a validation failure.
 UNKNOWN_SENTINEL = "UNBEKANNT"
+
+# Answer for a multi-choice step (e.g. tags) when none of the offered
+# candidates applies - an explicitly empty selection, not an error.
+NONE_SENTINEL = "KEINE"
 
 CANDIDATE_FETCHERS: dict[str, Callable[[PaperlessClient], list[dict]]] = {
     "document_types": lambda paperless: paperless.list_document_types(),
+    "tags": lambda paperless: paperless.list_tags(),
 }
+
+# How long a fetched candidate list (document types, tags, ...) is reused
+# across separate `archivlotse process` invocations before being
+# re-fetched from Paperless - these lists change rarely, and nearly every
+# step needs one (directly, or indirectly via document_type_name), so
+# caching avoids a Paperless round-trip per step.
+CANDIDATE_CACHE_TTL_SECONDS = 2 * 60 * 60  # 2 Stunden
 
 # A new OCR result must be at least this fraction of the previous text's
 # length to be accepted - a cheap sanity floor against Docling returning
@@ -39,14 +58,35 @@ def _fingerprint(*parts: str) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _resolve_document_type_name(document: dict, paperless: PaperlessClient) -> str | None:
+def _get_candidates(conn: sqlite3.Connection, paperless: PaperlessClient, endpoint: str) -> list[dict]:
+    """Fetch a candidate list (e.g. Paperless tags/document types) for
+    `endpoint`, reusing a cached copy (see CANDIDATE_CACHE_TTL_SECONDS) if
+    one is still fresh enough instead of hitting Paperless again."""
+    cached = get_cached_candidates(conn, endpoint, CANDIDATE_CACHE_TTL_SECONDS)
+    if cached is not None:
+        return cached
+    try:
+        fetch = CANDIDATE_FETCHERS[endpoint]
+    except KeyError as exc:
+        available = ", ".join(sorted(CANDIDATE_FETCHERS))
+        raise ValueError(
+            f"Unbekannter candidates_endpoint {endpoint!r}. Verfügbar: {available}"
+        ) from exc
+    candidates = fetch(paperless)
+    save_candidates(conn, endpoint, candidates)
+    return candidates
+
+
+def _resolve_document_type_name(
+    document: dict, paperless: PaperlessClient, conn: sqlite3.Connection
+) -> str | None:
     """Resolve the document's current document_type ID to its name, so
     it can be used in step conditions and exposed to prompt templates as
     `document_type_name`. Returns None if no document_type is set."""
     type_id = document.get("document_type")
     if type_id is None:
         return None
-    for candidate in paperless.list_document_types():
+    for candidate in _get_candidates(conn, paperless, "document_types"):
         if candidate["id"] == type_id:
             return candidate["name"]
     return None
@@ -129,7 +169,7 @@ def process_step(
     """Run one config-defined processing step for a Paperless document.
 
     Everything step-specific comes from the step named `step_name` in
-    config/steps.yaml (see StepConfig/load_step_config). Three shapes are
+    config/steps.yaml (see StepConfig/load_step_config). Four shapes are
     supported:
 
     - Plain field-to-field (default): render the prompt from
@@ -140,14 +180,19 @@ def process_step(
       API, give the prompt the candidate names, and only ever write back
       a candidate the AI's answer actually matched - a hallucinated or
       unparseable answer is rejected, never written to Paperless.
+    - Multi-choice from candidates (`candidates_endpoint` + `multi: true`,
+      e.g. tags): same idea, but the AI may suggest several comma-
+      separated candidates; each is validated independently (invalid ones
+      are dropped, not fatal to the step) and the matched ones are ADDED
+      to the field's existing values rather than replacing them.
     - OCR quality check (step has `quality_check` set): no AI role/prompt
       at all - estimate the existing text's OCR quality, and only if it's
       below quality_threshold, re-OCR the original file via Docling Serve
       and (if the result passes a basic sanity check) write it back.
 
-    Both of the first two shapes also support a `condition`: the step is
-    skipped entirely (no AI call) unless the document's current field(s)
-    match the configured expectation.
+    All shapes except the OCR check also support a `condition`: the step
+    is skipped entirely (no AI call) unless the document's current
+    field(s) match the configured expectation.
 
     Already-computed results are cached in SQLite (keyed by a fingerprint
     of the input, prompt version, AI provider/model, postprocessing
@@ -166,6 +211,10 @@ def process_step(
             return _process_ocr_step(step_config, paperless, conn, document_id, dry_run)
 
         ai_config = load_ai_config(ai_role or step_config.ai_role, ai_config_path)
+        if step_config.candidates_endpoint and step_config.multi:
+            return _process_multi_choice_step(
+                step_config, ai_config, paperless, conn, document_id, dry_run
+            )
         if step_config.candidates_endpoint:
             return _process_choice_step(step_config, ai_config, paperless, conn, document_id, dry_run)
         return _process_text_step(step_config, ai_config, paperless, conn, document_id, dry_run)
@@ -181,7 +230,7 @@ def _process_text_step(
 ) -> str | None:
     document = paperless.get_document(document_id)
 
-    document_type_name = _resolve_document_type_name(document, paperless)
+    document_type_name = _resolve_document_type_name(document, paperless, conn)
     if not _condition_met(step_config, document, document_type_name):
         logger.info(
             "Dokument %s, Schritt %r: Bedingung %r nicht erfüllt, Schritt übersprungen",
@@ -280,27 +329,18 @@ def _process_choice_step(
 ) -> str | None:
     document = paperless.get_document(document_id)
 
-    try:
-        fetch_candidates = CANDIDATE_FETCHERS[step_config.candidates_endpoint]
-    except KeyError as exc:
-        available = ", ".join(sorted(CANDIDATE_FETCHERS))
-        raise ValueError(
-            f"Unbekannter candidates_endpoint {step_config.candidates_endpoint!r} für "
-            f"Schritt {step_config.name!r}. Verfügbar: {available}"
-        ) from exc
-
-    candidates = fetch_candidates(paperless)
+    candidates = _get_candidates(conn, paperless, step_config.candidates_endpoint)
     name_by_id = {candidate["id"]: candidate["name"] for candidate in candidates}
     id_by_normalized_name = {
         candidate["name"].strip().casefold(): candidate["id"] for candidate in candidates
     }
 
     # Reuse the candidates list to resolve document_type_name when this IS
-    # the document_type step itself, instead of an extra Paperless call.
+    # the document_type step itself, instead of an extra lookup.
     if step_config.candidates_endpoint == "document_types":
         document_type_name = name_by_id.get(document.get("document_type"))
     else:
-        document_type_name = _resolve_document_type_name(document, paperless)
+        document_type_name = _resolve_document_type_name(document, paperless, conn)
 
     if not _condition_met(step_config, document, document_type_name):
         logger.info(
@@ -436,7 +476,7 @@ def _apply_value(
     old_value,
     new_value: str,
     dry_run: bool,
-    write_value: int | str | None = None,
+    write_value: int | str | list[int] | None = None,
 ) -> str:
     """Compare old vs. new value and, unless unchanged or dry_run, write
     write_value (defaulting to new_value) to Paperless and audit-log the
@@ -608,4 +648,151 @@ def _process_ocr_step(
         new_summary,
         dry_run,
         write_value=new_text,
+    )
+
+
+def _process_multi_choice_step(
+    step_config: StepConfig,
+    ai_config: AIConfig,
+    paperless: PaperlessClient,
+    conn: sqlite3.Connection,
+    document_id: int,
+    dry_run: bool,
+) -> str | None:
+    """Like _process_choice_step, but for fields that hold a LIST of
+    candidate ids (e.g. Paperless tags, a many-to-many relation) rather
+    than a single one: the AI may suggest several comma-separated
+    candidates, each is validated independently, and valid ones are
+    ADDED to the field's current values - existing values are never
+    removed, protecting metadata a person may have set by hand."""
+    document = paperless.get_document(document_id)
+
+    candidates = _get_candidates(conn, paperless, step_config.candidates_endpoint)
+    name_by_id = {candidate["id"]: candidate["name"] for candidate in candidates}
+    id_by_normalized_name = {
+        candidate["name"].strip().casefold(): candidate["id"] for candidate in candidates
+    }
+
+    document_type_name = _resolve_document_type_name(document, paperless, conn)
+    if not _condition_met(step_config, document, document_type_name):
+        logger.info(
+            "Dokument %s, Schritt %r: Bedingung %r nicht erfüllt, Schritt übersprungen",
+            document_id,
+            step_config.name,
+            step_config.condition,
+        )
+        return None
+
+    input_text = str(document.get(step_config.source_field) or "").strip()
+    current_ids = sorted(document.get(step_config.target_field) or [])
+    current_names = ", ".join(name_by_id.get(i, str(i)) for i in current_ids)
+
+    if not input_text:
+        logger.warning(
+            "Dokument %s: Feld %r ist leer, Schritt %r übersprungen",
+            document_id,
+            step_config.source_field,
+            step_config.name,
+        )
+        return None
+
+    truncated_text = input_text[: step_config.max_input_chars]
+    prompt_source = load_prompt_source(step_config.prompt)
+    prompt_version = hashlib.sha256(prompt_source.encode("utf-8")).hexdigest()
+    postprocessing_signature = (
+        f"strip_quotes={step_config.strip_quotes};"
+        f"max_output_length={step_config.max_output_length}"
+    )
+    candidates_signature = "|".join(sorted(candidate["name"] for candidate in candidates))
+    fingerprint = _fingerprint(
+        truncated_text,
+        prompt_version,
+        ai_config.provider,
+        ai_config.model,
+        postprocessing_signature,
+        candidates_signature,
+    )
+
+    cached = get_cached_step_result(conn, step_config.name, document_id, fingerprint)
+    if cached is not None:
+        suggestion = cached["output_value"]
+        logger.info(
+            "Dokument %s, Schritt %r: unveränderte Eingabe/Kandidaten/Prompt/Modell, "
+            "nutze zwischengespeicherten Vorschlag %r",
+            document_id,
+            step_config.name,
+            suggestion,
+        )
+    else:
+        prompt = render_prompt(
+            step_config.prompt,
+            input_text=truncated_text,
+            candidate_names=[candidate["name"] for candidate in candidates],
+            document_type_name=document_type_name,
+        )
+        ai_client = build_ai_client(ai_config)
+        logger.info(
+            "Dokument %s, Schritt %r: frage Vorschlag bei %s/%s an (%d Kandidaten)",
+            document_id,
+            step_config.name,
+            ai_config.provider,
+            ai_config.model,
+            len(candidates),
+        )
+        logger.debug(
+            "Dokument %s, Schritt %r: vollständiger Prompt:\n%s", document_id, step_config.name, prompt
+        )
+        raw_output = ai_client.generate(prompt)
+        logger.debug(
+            "Dokument %s, Schritt %r: rohe KI-Antwort: %r", document_id, step_config.name, raw_output
+        )
+        suggestion = _postprocess(raw_output, step_config)
+        save_step_result(
+            conn,
+            step_name=step_config.name,
+            document_id=document_id,
+            fingerprint=fingerprint,
+            output_value=suggestion,
+            provider=ai_config.provider,
+            model=ai_config.model,
+            prompt_name=step_config.prompt,
+            prompt_version=prompt_version,
+        )
+        logger.info(
+            "Dokument %s, Schritt %r: neuer Vorschlag: %r",
+            document_id,
+            step_config.name,
+            suggestion,
+        )
+
+    matched_ids: set[int] = set()
+    if suggestion.strip().casefold() != NONE_SENTINEL.casefold():
+        for piece in suggestion.split(","):
+            piece = piece.strip()
+            if not piece:
+                continue
+            matched_id = id_by_normalized_name.get(piece.casefold())
+            if matched_id is None:
+                logger.warning(
+                    "Dokument %s, Schritt %r: Vorschlag %r entspricht keinem vorhandenen "
+                    "Kandidaten, wird ignoriert",
+                    document_id,
+                    step_config.name,
+                    piece,
+                )
+                continue
+            matched_ids.add(matched_id)
+
+    new_ids = sorted(set(current_ids) | matched_ids)
+    new_names = ", ".join(name_by_id.get(i, str(i)) for i in new_ids)
+
+    return _apply_value(
+        step_config,
+        paperless,
+        conn,
+        document_id,
+        current_names or "(keine)",
+        new_names or "(keine)",
+        dry_run,
+        write_value=new_ids,
     )

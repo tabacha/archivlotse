@@ -17,6 +17,7 @@
 pipeline:
   - ocr_check
   - document_type
+  - tags
   - title
 
 steps:
@@ -61,6 +62,29 @@ steps:
     postprocessing:
       strip_quotes: true
       max_length: 200
+
+  tags:
+    source_field: content
+    target_field: tags
+
+    prompt: tags.j2
+    ai_role: tags
+
+    # Tags sind eine Mehrfachauswahl (ein Dokument kann mehrere haben).
+    # Die KI darf mehrere, durch Komma getrennte, vorhandene Tags
+    # vorschlagen (candidates_endpoint: tags). Unbekannte Einzelvorschlaege
+    # werden nur einzeln verworfen statt den ganzen Schritt abzulehnen.
+    # Vorgeschlagene Tags werden zu den vorhandenen HINZUGEFUEGT - bereits
+    # gesetzte Tags werden nie entfernt.
+    candidates_endpoint: tags
+    multi: true
+
+    preprocessing:
+      max_input_chars: 8000
+
+    postprocessing:
+      strip_quotes: true
+      max_length: 500
 
   title:
     # Paperless-Feld, das als Eingabetext fuer den Prompt gelesen wird.

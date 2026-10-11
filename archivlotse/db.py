@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,15 @@ def init_db(path: str | Path = "data/archivlotse.db") -> sqlite3.Connection:
             old_value TEXT,
             new_value TEXT NOT NULL,
             changed_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS candidate_cache (
+            endpoint TEXT PRIMARY KEY,
+            data TEXT NOT NULL,
+            fetched_at TEXT NOT NULL
         )
         """
     )
@@ -98,6 +108,37 @@ def save_step_result(
             prompt_version,
             datetime.now(timezone.utc).isoformat(),
         ),
+    )
+    conn.commit()
+
+
+def get_cached_candidates(
+    conn: sqlite3.Connection, endpoint: str, max_age_seconds: float
+) -> list[dict] | None:
+    """Return a previously cached candidate list (e.g. Paperless tags or
+    document types) for `endpoint`, if it was fetched within the last
+    `max_age_seconds` - otherwise None, meaning the caller should fetch
+    fresh and call save_candidates()."""
+    row = conn.execute(
+        "SELECT data, fetched_at FROM candidate_cache WHERE endpoint = ?", (endpoint,)
+    ).fetchone()
+    if row is None:
+        return None
+    fetched_at = datetime.fromisoformat(row["fetched_at"])
+    age = (datetime.now(timezone.utc) - fetched_at).total_seconds()
+    if age > max_age_seconds:
+        return None
+    return json.loads(row["data"])
+
+
+def save_candidates(conn: sqlite3.Connection, endpoint: str, candidates: list[dict]) -> None:
+    conn.execute(
+        """
+        INSERT INTO candidate_cache (endpoint, data, fetched_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(endpoint) DO UPDATE SET data = excluded.data, fetched_at = excluded.fetched_at
+        """,
+        (endpoint, json.dumps(candidates), datetime.now(timezone.utc).isoformat()),
     )
     conn.commit()
 

@@ -21,7 +21,9 @@ class PaperlessClient:
         response.raise_for_status()
         return response.json()
 
-    def update_document_field(self, document_id: int, field: str, value: int | str) -> None:
+    def update_document_field(
+        self, document_id: int, field: str, value: int | str | list[int]
+    ) -> None:
         response = self._client.patch(
             f"/api/documents/{document_id}/", json={field: value}
         )
@@ -31,6 +33,11 @@ class PaperlessClient:
         """Fetch all document types configured in Paperless, following
         pagination, each as {"id": ..., "name": ..., ...}."""
         return self._list_all("/api/document_types/")
+
+    def list_tags(self) -> list[dict]:
+        """Fetch all tags configured in Paperless, following pagination,
+        each as {"id": ..., "name": ..., ...}."""
+        return self._list_all("/api/tags/")
 
     def download_original(self, document_id: int) -> bytes:
         """Fetch the original (unmodified) document file."""

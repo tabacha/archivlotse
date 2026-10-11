@@ -17,6 +17,10 @@ class StepConfig:
     strip_quotes: bool = True
     max_output_length: int | None = None
     candidates_endpoint: str | None = None
+    # Mehrfachauswahl statt genau eines Werts (z.B. Tags): die KI darf
+    # mehrere, kommagetrennte Kandidaten vorschlagen; gueltige Vorschlaege
+    # werden zu den vorhandenen Werten HINZUGEFUEGT statt sie zu ersetzen.
+    multi: bool = False
     # Nur fuer OCR-Qualitaetsschritte (quality_check gesetzt):
     quality_check: str | None = None
     quality_threshold: float = 0.6
@@ -80,6 +84,7 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
         strip_quotes=postprocessing.get("strip_quotes", True),
         max_output_length=postprocessing.get("max_length"),
         candidates_endpoint=step.get("candidates_endpoint"),
+        multi=step.get("multi", False),
         quality_check=quality_check,
         quality_threshold=step.get("quality_threshold", 0.6),
         min_chars_for_check=step.get("min_chars_for_check", 200),
