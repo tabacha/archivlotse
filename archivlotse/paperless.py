@@ -29,7 +29,7 @@ class PaperlessClient:
         return response.json()
 
     def update_document_field(
-        self, document_id: int, field: str, value: int | str | list[int]
+        self, document_id: int, field: str, value: int | str | list[int] | list[dict]
     ) -> None:
         response = self._client.patch(
             f"/api/documents/{document_id}/", json={field: value}
@@ -54,6 +54,12 @@ class PaperlessClient:
         live); requesting _LIST_PAGE_SIZE at once cuts that to a single
         request in practice."""
         return self._list_all("/api/correspondents/", params={"page_size": _LIST_PAGE_SIZE})
+
+    def list_custom_fields(self) -> list[dict]:
+        """Fetch all custom field definitions configured in Paperless,
+        following pagination, each as {"id": ..., "name": ...,
+        "data_type": ..., "extra_data": ...}."""
+        return self._list_all("/api/custom_fields/", params={"page_size": _LIST_PAGE_SIZE})
 
     def list_documents(
         self, tags_all: list[int] | None = None, tags_none: list[int] | None = None

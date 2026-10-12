@@ -33,8 +33,9 @@ class StepConfig:
     docling_force_ocr: bool = True
     # Schritt nur ausfuehren, wenn das genannte Feld (bzw. bei
     # "document_type" dessen aufgeloester Name) dem erwarteten Wert
-    # entspricht, z.B. {"document_type": "Kontoauszug"}.
-    condition: dict[str, str] | None = None
+    # entspricht, z.B. {"document_type": "Kontoauszug"} - oder einem von
+    # mehreren erlaubten Werten, z.B. {"document_type": ["Rechnung", "Quittung"]}.
+    condition: dict[str, str | list[str]] | None = None
     # Nur fuer Korrespondenten-Schritte (prompt_step2 gesetzt): zweistufige
     # Erkennung - KI (prompt/model) ermittelt einen wahrscheinlichen Namen
     # aus dem Text, RapidFuzz vergleicht ihn deterministisch mit den
@@ -75,6 +76,16 @@ class StepConfig:
     date_small_max_chars: int = 8000
     date_part_chars: int = 6000
     date_min_score: int = 85
+    # Nur fuer Zusatzfeld-Schritte (custom_field gesetzt): Name eines in
+    # Paperless bereits vorhandenen Zusatzfelds (Custom Field), das mit der
+    # (je nach Datentyp des Felds validierten) KI-Antwort beschrieben wird.
+    # Fehlende Zusatzfelder werden NICHT angelegt. target_field ist dann
+    # immer "custom_fields".
+    custom_field: str | None = None
+    # Zusatzfeld-Schritte: ein bereits gesetzter Wert wird nur
+    # ueberschrieben, wenn das ausdruecklich erlaubt ist (sonst wird der
+    # Schritt vor dem KI-Aufruf uebersprungen).
+    overwrite_existing: bool = False
 
 
 def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepConfig:
@@ -112,6 +123,14 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
     be "tags"); no source_field/prompt/model needed. A named tag that
     doesn't exist in Paperless is an error, never auto-created.
 
+    If custom_field is set, this is a custom-field step: like a text step,
+    but the (cleaned-up) AI answer is validated against the named Paperless
+    custom field's data type (e.g. a number for "float") and written into
+    the document's custom_fields list; target_field defaults to (and must
+    be) "custom_fields". A custom field missing from Paperless is an
+    error, never auto-created. An already set value is left alone unless
+    overwrite_existing is true.
+
     requires_previous_success makes process_pipeline skip the step if an
     earlier step in the same run raised (has no effect with --step).
 
@@ -139,11 +158,15 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
     docling = step.get("docling", {}) or {}
     date = step.get("date", {}) or {}
     quality_check = step.get("quality_check")
+    custom_field = step.get("custom_field")
+    target_field = step.get("target_field") or ("custom_fields" if custom_field else None)
+    if not target_field:
+        raise ValueError(f"Schritt {name!r}: 'target_field' ist erforderlich")
 
     config = StepConfig(
         name=name,
         source_field=step.get("source_field", ""),
-        target_field=step["target_field"],
+        target_field=target_field,
         prompt=step.get("prompt"),
         model=step.get("model"),
         max_input_chars=preprocessing.get("max_input_chars", 8000),
@@ -170,6 +193,8 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
         date_small_max_chars=date.get("small_max_chars", 8000),
         date_part_chars=date.get("part_chars", 6000),
         date_min_score=date.get("min_score", 85),
+        custom_field=custom_field,
+        overwrite_existing=step.get("overwrite_existing", False),
     )
 
     if config.add_tags:
@@ -195,6 +220,12 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
         raise ValueError(
             f"Schritt {name!r}: 'prompt' und 'model' sind erforderlich (außer bei "
             "quality_check- und add_tags-Schritten)"
+        )
+
+    if config.custom_field and config.target_field != "custom_fields":
+        raise ValueError(
+            f"Schritt {name!r}: 'custom_field' benötigt target_field: custom_fields "
+            "(oder target_field weglassen)"
         )
 
     if config.prompt_step2 and not config.candidates_endpoint:

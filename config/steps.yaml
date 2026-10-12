@@ -20,6 +20,7 @@ pipeline:
   - document_type
   - correspondent
   - document_date
+  - geldbetrag
   - tags
   - title
   - mark_done
@@ -183,6 +184,35 @@ steps:
       # das Feld noch leer ist - ein vorhandenes Datum wird nie durch eine
       # unsichere Schaetzung ueberschrieben.
       min_score: 85
+
+    postprocessing:
+      strip_quotes: true
+      max_length: 50
+
+  # Zusatzfeld (Custom Field) "Geldbetrag" mit dem Gesamtbetrag fuellen -
+  # nur bei Rechnungen und Quittungen (condition, Dokumenttyp wird vorher
+  # von document_type gesetzt, daher danach in pipeline:). Das Zusatzfeld
+  # muss in Paperless bereits existieren; die Antwort wird gegen dessen
+  # Datentyp geprueft (hier float: nur eine Zahl wird geschrieben, alles
+  # andere bzw. KEIN-WERT wird verworfen). target_field ist bei
+  # custom_field-Schritten immer custom_fields und kann entfallen.
+  geldbetrag:
+    source_field: content
+    custom_field: Geldbetrag
+    condition:
+      document_type:
+        - Rechnung
+        - Quittung
+
+    prompt: geldbetrag.j2
+    model: "mistral-small-3.2-24b-instruct-2506"
+
+    # Einen bereits (z.B. von Hand) gesetzten Betrag nie ueberschreiben -
+    # der Schritt wird dann vor dem KI-Aufruf uebersprungen.
+    overwrite_existing: false
+
+    preprocessing:
+      max_input_chars: 8000
 
     postprocessing:
       strip_quotes: true

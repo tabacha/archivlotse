@@ -27,6 +27,7 @@ class FakePaperlessClient:
         tags=None,
         correspondents=None,
         original_bytes=b"%PDF-fake%",
+        custom_fields=None,
     ):
         self.document = {
             "id": 1,
@@ -37,6 +38,7 @@ class FakePaperlessClient:
         self.document_types = document_types or []
         self.tags = tags or []
         self.correspondents = correspondents or []
+        self.custom_fields = custom_fields or []
         self.original_bytes = original_bytes
         self.download_calls = 0
         self.list_document_types_calls = 0
@@ -69,6 +71,9 @@ class FakePaperlessClient:
     def list_correspondents(self):
         self.list_correspondents_calls += 1
         return list(self.correspondents)
+
+    def list_custom_fields(self):
+        return list(self.custom_fields)
 
     def download_original(self, document_id):
         self.download_calls += 1
@@ -1362,3 +1367,120 @@ def test_parse_date_answer():
     assert parse("15.03.2025|0", today) is None
     assert parse("13.10.2026", today) is None
     assert parse("01.01.1899", today) is None
+
+
+FAKE_CUSTOM_FIELD_STEP_CONFIG = StepConfig(
+    name="geldbetrag",
+    prompt="geldbetrag.j2",
+    model="m",
+    source_field="content",
+    target_field="custom_fields",
+    max_output_length=50,
+    custom_field="Geldbetrag",
+    condition={"document_type": ["Rechnung", "Quittung"]},
+)
+
+
+def _run_custom_field_step(
+    monkeypatch, tmp_path, answers, document_type=1, custom_fields=None, step_config=None, fields=None
+):
+    fake_paperless = FakePaperlessClient(
+        document_types=[{"id": 1, "name": "Rechnung"}, {"id": 2, "name": "Kontoauszug"}],
+        custom_fields=fields
+        or [
+            {"id": 2, "name": "Geldbetrag", "data_type": "float", "extra_data": None},
+            {"id": 4, "name": "Steuerverteilung", "data_type": "select", "extra_data": {}},
+        ],
+    )
+    fake_paperless.document["document_type"] = document_type
+    fake_paperless.document["custom_fields"] = custom_fields or []
+    fake_ai = SequenceAIClient(answers)
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_paperless_config",
+        lambda path: PaperlessConfig(url="http://paperless.example", token="t"),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_ai_config",
+        lambda model, path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
+    )
+    monkeypatch.setattr(
+        pipeline_module, "load_step_config", lambda name, path: step_config or FAKE_CUSTOM_FIELD_STEP_CONFIG
+    )
+    monkeypatch.setattr(pipeline_module, "PaperlessClient", lambda config: fake_paperless)
+    monkeypatch.setattr(pipeline_module, "build_ai_client", lambda config: fake_ai)
+    result = pipeline_module.process_step(
+        step_name="geldbetrag", document_id=1, db_path=str(tmp_path / "test.db")
+    )
+    return result, fake_paperless, fake_ai, str(tmp_path / "test.db")
+
+
+def test_custom_field_step_writes_value_and_keeps_other_custom_fields(monkeypatch, tmp_path):
+    result, paperless, ai, db_path = _run_custom_field_step(
+        monkeypatch, tmp_path, ["1147.60"], custom_fields=[{"field": 4, "value": "abc"}]
+    )
+    assert result == "1147.6"
+    assert paperless.update_calls == [
+        ("custom_fields", [{"field": 4, "value": "abc"}, {"field": 2, "value": 1147.6}])
+    ]
+    assert "Geldbetrag" in ai.prompts[0] and "Rechnung" in ai.prompts[0]
+    rows = pipeline_module.init_db(db_path).execute("SELECT * FROM audit_log").fetchall()
+    assert [(r["field_name"], r["old_value"], r["new_value"]) for r in rows] == [
+        ("custom_field:Geldbetrag", None, "1147.6")
+    ]
+
+
+def test_custom_field_step_skipped_for_other_document_type(monkeypatch, tmp_path):
+    result, paperless, ai, _ = _run_custom_field_step(monkeypatch, tmp_path, [], document_type=2)
+    assert result is None
+    assert paperless.update_calls == []
+    assert ai.prompts == []
+
+
+def test_custom_field_step_does_not_overwrite_existing_value(monkeypatch, tmp_path):
+    result, paperless, ai, _ = _run_custom_field_step(
+        monkeypatch, tmp_path, [], custom_fields=[{"field": 2, "value": 96.0}]
+    )
+    assert result is None
+    assert paperless.update_calls == []
+    assert ai.prompts == []
+
+
+def test_custom_field_step_overwrites_when_allowed(monkeypatch, tmp_path):
+    config = StepConfig(**{**FAKE_CUSTOM_FIELD_STEP_CONFIG.__dict__, "overwrite_existing": True})
+    result, paperless, _, _ = _run_custom_field_step(
+        monkeypatch, tmp_path, ["99,50"], custom_fields=[{"field": 2, "value": 96.0}], step_config=config
+    )
+    assert result == "99.5"
+    assert paperless.update_calls == [("custom_fields", [{"field": 2, "value": 99.5}])]
+
+
+@pytest.mark.parametrize("answer", ["KEIN-WERT", "ca. 100 Euro", "1.234,56"])
+def test_custom_field_step_rejects_sentinel_and_invalid_answers(monkeypatch, tmp_path, answer):
+    result, paperless, _, _ = _run_custom_field_step(monkeypatch, tmp_path, [answer])
+    assert result is None
+    assert paperless.update_calls == []
+
+
+def test_custom_field_step_missing_field_raises(monkeypatch, tmp_path):
+    with pytest.raises(ValueError, match="existiert nicht"):
+        _run_custom_field_step(
+            monkeypatch, tmp_path, [], fields=[{"id": 1, "name": "Rechnungsnummer", "data_type": "string"}]
+        )
+
+
+def test_parse_custom_field_answer():
+    parse = pipeline_module._parse_custom_field_answer
+    assert parse("12.5", {"data_type": "float"}) == 12.5
+    assert parse("12,50", {"data_type": "float"}) == 12.5
+    assert parse("12", {"data_type": "integer"}) == 12
+    assert parse("12.5", {"data_type": "integer"}) is None
+    assert parse("KEIN-WERT", {"data_type": "float"}) is None
+    assert parse("12.5", {"data_type": "monetary"}) == "12.50"
+    assert parse("EUR 12,5", {"data_type": "monetary"}) == "EUR12.50"
+    assert parse("12.5", {"data_type": "monetary", "extra_data": {"default_currency": "EUR"}}) == "EUR12.50"
+    assert parse("EUR 12 USD", {"data_type": "monetary"}) is None
+    assert parse("RE-2024-17", {"data_type": "string"}) == "RE-2024-17"
+    with pytest.raises(ValueError, match="nicht"):
+        parse("x", {"name": "Steuerverteilung", "data_type": "select"})

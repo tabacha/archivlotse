@@ -58,6 +58,20 @@ NO_DATE_SENTINEL = "KEIN-DATUM-GEFUNDEN"
 # date buried in an explanation is rejected rather than guessed at.
 _DATE_ANSWER_RE = re.compile(r"(\d{2})\.(\d{2})\.(\d{4})(?:\s*\|\s*(\d{1,3}))?")
 
+# Answer for a custom-field step (see e.g. config/prompts/geldbetrag.j2)
+# when the value can't be reliably determined from the text - nothing is
+# written.
+NO_VALUE_SENTINEL = "KEIN-WERT"
+
+# Numeric custom-field answers (data types integer/float/monetary): a plain
+# number, "." or "," as decimal separator, no thousands separators - for
+# monetary optionally with a 3-letter currency code before or after it.
+# Matched against the WHOLE cleaned answer, like _DATE_ANSWER_RE.
+_NUMBER_ANSWER_RE = re.compile(r"-?\d+(?:[.,]\d+)?")
+_MONETARY_ANSWER_RE = re.compile(
+    r"(?:(?P<prefix>[A-Z]{3})\s*)?(?P<amount>-?\d+(?:[.,]\d{1,2})?)(?:\s*(?P<suffix>[A-Z]{3}))?"
+)
+
 # Earliest year accepted as a plausible document creation date - an older
 # one is almost certainly an OCR/AI error (or a birth date etc.).
 MIN_DOCUMENT_YEAR = 1900
@@ -73,6 +87,7 @@ CANDIDATE_FETCHERS: dict[str, Callable[[PaperlessClient], list[dict]]] = {
     "document_types": lambda paperless: paperless.list_document_types(),
     "tags": lambda paperless: paperless.list_tags(),
     "correspondents": lambda paperless: paperless.list_correspondents(),
+    "custom_fields": lambda paperless: paperless.list_custom_fields(),
 }
 
 # How long a fetched candidate list (document types, tags, ...) is reused
@@ -157,7 +172,8 @@ def _condition_met(step_config: StepConfig, document: dict, document_type_name: 
         return True
     for field, expected in step_config.condition.items():
         actual = document_type_name if field == "document_type" else document.get(field)
-        if actual != expected:
+        allowed = expected if isinstance(expected, list) else [expected]
+        if actual not in allowed:
             return False
     return True
 
@@ -412,6 +428,10 @@ def process_step(
     - Document-date step (step has `date: {prompt_small: ...}` set): see
       _process_date_step - one full-text AI call for short documents,
       otherwise first/last part with a confidence score per answer.
+    - Custom-field step (step has `custom_field` set): see
+      _process_custom_field_step - like a text step, but the answer is
+      validated against the Paperless custom field's data type and written
+      into the document's custom_fields list.
     - Correspondent step (step has `prompt_step2` set): two-stage
       recognition - the primary prompt/model extracts a probable name
       from the text, RapidFuzz scores it against candidates_endpoint's
@@ -447,6 +467,10 @@ def process_step(
             return _process_add_tags_step(step_config, paperless, conn, document_id, dry_run, force)
 
         ai_config = load_ai_config(model or step_config.model, ai_config_path)
+        if step_config.custom_field:
+            return _process_custom_field_step(
+                step_config, ai_config, paperless, conn, document_id, dry_run, force
+            )
         if step_config.date_prompt_small:
             return _process_date_step(step_config, ai_config, paperless, conn, document_id, dry_run, force)
         if step_config.prompt_step2:
@@ -1269,6 +1293,228 @@ def _process_date_step(
     return _apply_value(step_config, paperless, conn, document_id, old_value, new_value, dry_run)
 
 
+def _parse_custom_field_answer(answer: str, field: dict) -> int | float | str | None:
+    """Turn a cleaned-up custom-field answer into the value Paperless
+    expects for `field`'s data_type, or None for NO_VALUE_SENTINEL / an
+    answer that doesn't fit the type (e.g. text where a number is
+    expected) - the AI proposes, this decides whether it's usable at all.
+    Raises for a data type this step doesn't support (yet), since that's
+    a config error, not a bad answer."""
+    value = answer.strip()
+    if not value or value.casefold() == NO_VALUE_SENTINEL.casefold():
+        return None
+    data_type = field.get("data_type")
+    if data_type in ("string", "longtext"):
+        return value
+    if data_type in ("integer", "float"):
+        if not _NUMBER_ANSWER_RE.fullmatch(value):
+            return None
+        number = float(value.replace(",", "."))
+        if data_type == "float":
+            return number
+        return int(number) if number.is_integer() else None
+    if data_type == "monetary":
+        match = _MONETARY_ANSWER_RE.fullmatch(value)
+        if match is None or (match["prefix"] and match["suffix"]):
+            return None
+        currency = (
+            match["prefix"]
+            or match["suffix"]
+            or (field.get("extra_data") or {}).get("default_currency")
+            or ""
+        )
+        return f"{currency}{float(match['amount'].replace(',', '.')):.2f}"
+    raise ValueError(
+        f"Zusatzfeld {field.get('name')!r}: Datentyp {data_type!r} wird (noch) nicht "
+        "unterstützt (unterstützt: string, longtext, integer, float, monetary)"
+    )
+
+
+def _process_custom_field_step(
+    step_config: StepConfig,
+    ai_config: AIConfig,
+    paperless: PaperlessClient,
+    conn: sqlite3.Connection,
+    document_id: int,
+    dry_run: bool,
+    force: bool = False,
+) -> str | None:
+    """Fill one Paperless custom field (step_config.custom_field, e.g.
+    "Geldbetrag") from the document text:
+
+    1. Look up the field definition by name (cached custom_fields list,
+       re-fetched once before giving up, like _process_add_tags_step) - a
+       field missing from Paperless is an error, never auto-created.
+    2. Skip (before any AI call) if the condition isn't met, or if the
+       document already has a value and overwrite_existing is off.
+    3. Ask the AI (cached via fingerprint like a text step) and validate
+       the answer against the field's data type (_parse_custom_field_answer)
+       - NO_VALUE_SENTINEL or an answer of the wrong type writes nothing.
+    4. Write the document's whole custom_fields list back with just this
+       field's value replaced/added, so other custom fields keep their
+       values whether or not Paperless treats the PATCH as a full replace.
+    """
+    field_name = step_config.custom_field
+    field_label = f"custom_field:{field_name}"
+    fields = _get_candidates(conn, paperless, "custom_fields", force)
+    field = next((f for f in fields if f["name"].strip().casefold() == field_name.strip().casefold()), None)
+    if field is None and not force:
+        fields = _get_candidates(conn, paperless, "custom_fields", force=True)
+        field = next((f for f in fields if f["name"].strip().casefold() == field_name.strip().casefold()), None)
+    if field is None:
+        raise ValueError(
+            f"Schritt {step_config.name!r}: Zusatzfeld {field_name!r} existiert nicht in Paperless - "
+            "bitte dort anlegen (ArchivLotse legt keine Zusatzfelder selbst an)"
+        )
+
+    document = paperless.get_document(document_id)
+
+    document_type_name = _resolve_document_type_name(document, paperless, conn, force)
+    correspondent_name = _resolve_correspondent_name(document, paperless, conn, force)
+    if not _condition_met(step_config, document, document_type_name):
+        logger.info(
+            "Dokument %s, Schritt %r: Bedingung %r nicht erfüllt, Schritt übersprungen",
+            document_id,
+            step_config.name,
+            step_config.condition,
+        )
+        return None
+
+    current_fields = [
+        {"field": entry["field"], "value": entry.get("value")}
+        for entry in document.get("custom_fields") or []
+    ]
+    old_raw = next((entry["value"] for entry in current_fields if entry["field"] == field["id"]), None)
+    old_value = None if old_raw in (None, "") else str(old_raw)
+    if old_value is not None and not step_config.overwrite_existing:
+        logger.info(
+            "Dokument %s, Schritt %r: Zusatzfeld %r bereits gesetzt (%r), wird nicht überschrieben "
+            "(overwrite_existing: false)",
+            document_id,
+            step_config.name,
+            field_name,
+            old_value,
+        )
+        return None
+
+    input_text = str(document.get(step_config.source_field) or "").strip()
+    if not input_text:
+        logger.warning(
+            "Dokument %s: Feld %r ist leer, Schritt %r übersprungen",
+            document_id,
+            step_config.source_field,
+            step_config.name,
+        )
+        return None
+
+    truncated_text = input_text[: step_config.max_input_chars]
+    prompt_source = load_prompt_source(step_config.prompt)
+    prompt_version = hashlib.sha256(prompt_source.encode("utf-8")).hexdigest()
+    postprocessing_signature = (
+        f"strip_quotes={step_config.strip_quotes};"
+        f"max_output_length={step_config.max_output_length}"
+    )
+    fingerprint = _fingerprint(
+        truncated_text,
+        prompt_version,
+        ai_config.provider,
+        ai_config.model,
+        postprocessing_signature,
+        document_type_name or "",
+        correspondent_name or "",
+        f"{field['name']}:{field.get('data_type')}",
+    )
+
+    cached = None if force else get_cached_step_result(conn, step_config.name, document_id, fingerprint)
+    if cached is not None:
+        answer = cached["output_value"]
+        logger.info(
+            "Dokument %s, Schritt %r: unveränderte Eingabe/Prompt/Modell, nutze "
+            "zwischengespeicherte Antwort %r",
+            document_id,
+            step_config.name,
+            answer,
+        )
+    else:
+        prompt = render_prompt(
+            step_config.prompt,
+            input_text=truncated_text,
+            document_type_name=document_type_name,
+            correspondent_name=correspondent_name,
+            field_name=field["name"],
+        )
+        ai_client = build_ai_client(ai_config)
+        logger.info(
+            "Dokument %s, Schritt %r: frage Zusatzfeld %r bei %s/%s an",
+            document_id,
+            step_config.name,
+            field_name,
+            ai_config.provider,
+            ai_config.model,
+        )
+        logger.debug(
+            "Dokument %s, Schritt %r: vollständiger Prompt:\n%s", document_id, step_config.name, prompt
+        )
+        ai_result = ai_client.generate(prompt)
+        logger.debug(
+            "Dokument %s, Schritt %r: rohe KI-Antwort: %r", document_id, step_config.name, ai_result.text
+        )
+        cost = _log_usage(document_id, step_config.name, ai_config, ai_result)
+        answer = _postprocess(ai_result.text, step_config)
+        save_step_result(
+            conn,
+            step_name=step_config.name,
+            document_id=document_id,
+            fingerprint=fingerprint,
+            output_value=answer,
+            provider=ai_config.provider,
+            model=ai_config.model,
+            prompt_name=step_config.prompt,
+            prompt_version=prompt_version,
+            prompt_tokens=ai_result.prompt_tokens,
+            completion_tokens=ai_result.completion_tokens,
+            estimated_cost_usd=cost,
+        )
+        logger.info("Dokument %s, Schritt %r: Antwort: %r", document_id, step_config.name, answer)
+
+    new_raw = _parse_custom_field_answer(answer, field)
+    if new_raw is None:
+        if answer.strip().casefold() == NO_VALUE_SENTINEL.casefold():
+            logger.info(
+                "Dokument %s, Schritt %r: KI konnte keinen Wert für %r bestimmen (%s), "
+                "Zusatzfeld bleibt unverändert",
+                document_id,
+                step_config.name,
+                field_name,
+                NO_VALUE_SENTINEL,
+            )
+        else:
+            logger.warning(
+                "Dokument %s, Schritt %r: Antwort %r passt nicht zum Datentyp %r von %r, "
+                "wird verworfen und NICHT in Paperless übernommen",
+                document_id,
+                step_config.name,
+                answer,
+                field.get("data_type"),
+                field_name,
+            )
+        return None
+
+    others = [entry for entry in current_fields if entry["field"] != field["id"]]
+    write_value = others + [{"field": field["id"], "value": new_raw}]
+    return _apply_value(
+        step_config,
+        paperless,
+        conn,
+        document_id,
+        old_value,
+        str(new_raw),
+        dry_run,
+        write_value=write_value,
+        field_label=field_label,
+    )
+
+
 def _apply_value(
     step_config: StepConfig,
     paperless: PaperlessClient,
@@ -1277,19 +1523,23 @@ def _apply_value(
     old_value,
     new_value: str,
     dry_run: bool,
-    write_value: int | str | list[int] | None = None,
+    write_value: int | str | list[int] | list[dict] | None = None,
+    field_label: str | None = None,
 ) -> str:
     """Compare old vs. new value and, unless unchanged or dry_run, write
     write_value (defaulting to new_value) to Paperless and audit-log the
-    human-readable old_value/new_value pair."""
+    human-readable old_value/new_value pair - under field_label (default:
+    target_field), e.g. "custom_field:Geldbetrag" instead of the generic
+    "custom_fields"."""
     if write_value is None:
         write_value = new_value
+    label = field_label or step_config.target_field
 
     if new_value == old_value:
         logger.info(
             "Dokument %s, Feld %r: unverändert (%r), keine Aktualisierung nötig",
             document_id,
-            step_config.target_field,
+            label,
             new_value,
         )
         return new_value
@@ -1298,18 +1548,18 @@ def _apply_value(
         logger.info(
             "Dokument %s, Feld %r: [DRY-RUN] würde geändert: %r -> %r",
             document_id,
-            step_config.target_field,
+            label,
             old_value,
             new_value,
         )
         return new_value
 
     paperless.update_document_field(document_id, step_config.target_field, write_value)
-    append_audit_log(conn, document_id, step_config.target_field, old_value, new_value)
+    append_audit_log(conn, document_id, label, old_value, new_value)
     logger.info(
         "Dokument %s, Feld %r in Paperless geändert: %r -> %r",
         document_id,
-        step_config.target_field,
+        label,
         old_value,
         new_value,
     )

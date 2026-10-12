@@ -222,6 +222,7 @@ pipeline:
   - document_type
   - correspondent
   - document_date
+  - geldbetrag
   - tags
   - title
   - mark_done
@@ -275,6 +276,9 @@ aktuelle Dokument nicht passt, z. B. nur für Kontoauszüge:
     condition:
       document_type: Kontoauszug
 ```
+
+Statt eines einzelnen Werts geht auch eine Liste erlaubter Werte, z. B.
+`document_type: [Rechnung, Quittung]`.
 
 Aktuell wird nur `document_type` als Bedingungsfeld aufgelöst (vom
 Namen, nicht der ID); andere Feldnamen werden direkt mit dem
@@ -417,6 +421,31 @@ als "kein Datum gefunden".
       part_chars: 6000
       min_score: 85
 ```
+
+**Zusatzfeld-Schritt `geldbetrag`:** beschreibt ein Paperless-Zusatzfeld
+(Custom Field) – hier `Geldbetrag`, und nur bei Rechnungen und Quittungen.
+Das Zusatzfeld muss in Paperless **bereits existieren** (ArchivLotse legt
+keine an). Die KI-Antwort wird gegen den Datentyp des Felds geprüft
+(unterstützt: `string`, `longtext`, `integer`, `float`, `monetary`) – bei
+`Geldbetrag` (float) wird also nur eine Zahl geschrieben; `KEIN-WERT` oder
+eine Antwort im falschen Format wird verworfen. Andere Zusatzfelder des
+Dokuments bleiben unverändert. Ein bereits gesetzter Wert wird nur mit
+`overwrite_existing: true` überschrieben, sonst wird der Schritt vor dem
+KI-Aufruf übersprungen.
+
+```yaml
+  geldbetrag:
+    source_field: content
+    custom_field: Geldbetrag # Name des Zusatzfelds in Paperless
+    condition:
+      document_type: [Rechnung, Quittung]
+    prompt: geldbetrag.j2 # bekommt zusaetzlich {{ field_name }}
+    model: "mistral-small-3.2-24b-instruct-2506"
+    overwrite_existing: false
+```
+
+Für ein weiteres Zusatzfeld (z. B. `Rechnungsnummer`) reicht ein neuer
+Prompt plus ein solcher Eintrag in `steps:`/`pipeline:`.
 
 **Tag-Setz-Schritt `mark_done`:** ebenfalls ohne KI – hängt feste,
 **in Paperless bereits vorhandene** Tags an das Dokument an (vorhandene
