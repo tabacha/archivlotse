@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import httpx
 
-from .base import AIResult
+from .base import TEMPERATURE, AIResult
 
 
 class OpenAICompatibleClient:
@@ -27,6 +27,7 @@ class OpenAICompatibleClient:
             json={
                 "model": self._model,
                 "messages": [{"role": "user", "content": prompt}],
+                "temperature": TEMPERATURE,
             },
         )
         response.raise_for_status()

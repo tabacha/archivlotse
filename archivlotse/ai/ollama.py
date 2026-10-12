@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import httpx
 
-from .base import AIResult
+from .base import TEMPERATURE, AIResult
 
 
 class OllamaClient:
@@ -13,7 +13,12 @@ class OllamaClient:
     def generate(self, prompt: str) -> AIResult:
         response = self._client.post(
             "/api/generate",
-            json={"model": self._model, "prompt": prompt, "stream": False},
+            json={
+                "model": self._model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": TEMPERATURE},
+            },
         )
         response.raise_for_status()
         data = response.json()
