@@ -20,11 +20,17 @@ REGELN (in dieser Reihenfolge anwenden):
 - Summe brutto
 - Zu zahlender Betrag
 - Total
-{% endif %}
-{% if document_type_name == "Quittung" %}
-
+Werden in der Rechnung zusätzlich Jahres-, Vertrags- oder Gesamtbeiträge genannt, von denen nur ein Teil berechnet
+wird (z. B. anteiliger Beitrag für einen Zeitraum), verwende den mit dieser Rechnung tatsächlich geforderten Betrag.
+{% elif document_type_name == "Quittung" %}
 1. Bei Quittungen und Kassenbons verwende den tatsächlich bezahlten Gesamtbetrag (z. B. "Summe", "Gesamt",
 "Zu zahlen") - nicht den gegebenen Betrag ("Gegeben", "Bar"), wenn dieser wegen Rückgeld höher ist.
+Bei formlosen Quittungen (z. B. einer handschriftlichen oder frei formulierten Bestätigung) verwende den Betrag,
+der ausdrücklich als erhalten, bezahlt oder erstattet bestätigt wird.
+{% else %}
+1. Verwende den Gesamtbetrag, um den es in dem Dokument hauptsächlich geht (z. B. den insgesamt zu zahlenden,
+bezahlten, erstatteten oder gutgeschriebenen Betrag inklusive Mehrwertsteuer). Ist nicht eindeutig, welcher
+Betrag gemeint ist, antworte mit KEIN-WERT.
 {% endif %}
 
 2. Ignoriere insbesondere:
