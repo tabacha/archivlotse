@@ -12,6 +12,38 @@ Wiederholung im Titel ist redundant.
 - Wird in dem Text ein Titel/Betreff genannt darfst du den gerne verwenden und ggf. noch erweitern.
 - Maximale Länge: 120 Zeichen. Eher 60 Zeichen oder weniger.
 
+{% if document_type_name == "Gehaltsabrechnung" %}
+- Dies ist eine Gehaltsabrechnung.
+Verwende ausschließlich dieses Titelformat:
+
+Gehaltsabrechnung [Monat] [Jahr] [Vorname Nachname] [Korrektur]
+
+Regeln:
+
+*Dokumenttyp: Beginne den Titel immer mit „Gehaltsabrechnung“.
+
+* Monat: Verwende den Abrechnungsmonat aus dem Dokument, nicht das Ausstellungsdatum oder Zahlungsdatum. Schreibe den
+Monat vollständig auf Deutsch (z. B. „Juli“).
+
+* Jahr: Verwende das vierstellige Jahr des Abrechnungszeitraums.
+
+* Person: Verwende ausschließlich den vollständigen Vor- und Nachnamen der Person, die das Gehalt erhält (Arbeitnehmer).
+Verwende niemals den Namen des Arbeitgebers oder der ausstellenden Firma.
+
+* Korrekturen: Prüfe, ob es sich um eine korrigierte Abrechnung handelt.
+
+* Bei einer normalen Abrechnung entfällt der Korrekturzusatz vollständig.
+
+* Bei einer Korrektur mit erkennbarer Nummer ergänze „1. Korrektur“, „2. Korrektur“ usw.
+
+* Wenn eine Korrektur erkennbar ist, aber keine Nummer angegeben wird, ergänze nur „Korrektur“.
+
+* Erfinde niemals eine Korrektunummer.
+
+* Keine Zusatzinformationen: Füge keine Beträge, Personalnummern, Firmennamen, Datumsangaben, Dokumentnummern oder
+sonstige Informationen hinzu.
+{% endif %}
+
 
 {% if document_type_name == "Kontoauszug" %}
 - Dies ist ein Kontoauszug. Falls im Text ein Buchungszeitraum bzw. das
