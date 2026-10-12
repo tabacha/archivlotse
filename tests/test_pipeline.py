@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 
 import archivlotse.pipeline as pipeline_module
 from archivlotse.ai.base import AIResult
@@ -10,7 +11,7 @@ from archivlotse.steps import StepConfig
 FAKE_STEP_CONFIG = StepConfig(
     name="title",
     prompt="title.j2",
-    ai_role="title",
+    model="title",
     source_field="content",
     target_field="title",
     max_input_chars=8000,
@@ -25,8 +26,6 @@ class FakePaperlessClient:
         document_types=None,
         tags=None,
         correspondents=None,
-        documents_by_tag=None,
-        documents_by_id=None,
         original_bytes=b"%PDF-fake%",
     ):
         self.document = {
@@ -38,18 +37,11 @@ class FakePaperlessClient:
         self.document_types = document_types or []
         self.tags = tags or []
         self.correspondents = correspondents or []
-        self.documents_by_tag = documents_by_tag or {}
-        # Per-ID document records (e.g. {"tags": [...]}) for batch tests
-        # with several distinct documents - falls back to self.document
-        # (the single-document fixture used by non-batch tests) for any
-        # id not listed here.
-        self.documents_by_id = documents_by_id or {}
         self.original_bytes = original_bytes
         self.download_calls = 0
         self.list_document_types_calls = 0
         self.list_tags_calls = 0
         self.list_correspondents_calls = 0
-        self.list_documents_by_tag_id_calls: list[int] = []
         self.get_document_calls: list[int] = []
 
     def __enter__(self):
@@ -60,8 +52,6 @@ class FakePaperlessClient:
 
     def get_document(self, document_id):
         self.get_document_calls.append(document_id)
-        if document_id in self.documents_by_id:
-            return dict(self.documents_by_id[document_id])
         return dict(self.document)
 
     def update_document_field(self, document_id, field, value):
@@ -79,10 +69,6 @@ class FakePaperlessClient:
     def list_correspondents(self):
         self.list_correspondents_calls += 1
         return list(self.correspondents)
-
-    def list_documents_by_tag_id(self, tag_id):
-        self.list_documents_by_tag_id_calls.append(tag_id)
-        return list(self.documents_by_tag.get(tag_id, []))
 
     def download_original(self, document_id):
         self.download_calls += 1
@@ -115,7 +101,7 @@ def test_process_step_is_idempotent_and_audits_only_on_change(monkeypatch, tmp_p
     monkeypatch.setattr(
         pipeline_module,
         "load_ai_config",
-        lambda role, path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
+        lambda model, path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
     )
     monkeypatch.setattr(pipeline_module, "load_step_config", lambda name, path: FAKE_STEP_CONFIG)
     monkeypatch.setattr(pipeline_module, "PaperlessClient", lambda config: fake_paperless)
@@ -163,7 +149,7 @@ def test_process_step_force_bypasses_cache(monkeypatch, tmp_path):
     monkeypatch.setattr(
         pipeline_module,
         "load_ai_config",
-        lambda role, path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
+        lambda model, path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
     )
     monkeypatch.setattr(pipeline_module, "load_step_config", lambda name, path: FAKE_STEP_CONFIG)
     monkeypatch.setattr(pipeline_module, "PaperlessClient", lambda config: fake_paperless)
@@ -199,7 +185,7 @@ def test_process_step_recomputes_when_input_changes(monkeypatch, tmp_path):
     monkeypatch.setattr(
         pipeline_module,
         "load_ai_config",
-        lambda role, path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
+        lambda model, path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
     )
     monkeypatch.setattr(pipeline_module, "load_step_config", lambda name, path: FAKE_STEP_CONFIG)
     monkeypatch.setattr(pipeline_module, "PaperlessClient", lambda config: fake_paperless)
@@ -231,7 +217,7 @@ def test_text_step_passes_correspondent_name_to_prompt(monkeypatch, tmp_path):
     monkeypatch.setattr(
         pipeline_module,
         "load_ai_config",
-        lambda role, path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
+        lambda model, path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
     )
     monkeypatch.setattr(pipeline_module, "load_step_config", lambda name, path: FAKE_STEP_CONFIG)
     monkeypatch.setattr(pipeline_module, "PaperlessClient", lambda config: fake_paperless)
@@ -264,7 +250,7 @@ def test_text_step_recomputes_when_correspondent_changes(monkeypatch, tmp_path):
     monkeypatch.setattr(
         pipeline_module,
         "load_ai_config",
-        lambda role, path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
+        lambda model, path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
     )
     monkeypatch.setattr(pipeline_module, "load_step_config", lambda name, path: FAKE_STEP_CONFIG)
     monkeypatch.setattr(pipeline_module, "PaperlessClient", lambda config: fake_paperless)
@@ -288,7 +274,7 @@ def test_text_step_recomputes_when_correspondent_changes(monkeypatch, tmp_path):
 FAKE_CHOICE_STEP_CONFIG = StepConfig(
     name="document_type",
     prompt="document_type.j2",
-    ai_role="document_type",
+    model="document_type",
     source_field="content",
     target_field="document_type",
     candidates_endpoint="document_types",
@@ -309,7 +295,7 @@ def _patch_choice_common(monkeypatch, fake_paperless, fake_ai):
     monkeypatch.setattr(
         pipeline_module,
         "load_ai_config",
-        lambda role, path: AIConfig(provider="scaleway", base_url="http://scaleway.example", model="m"),
+        lambda model, path: AIConfig(provider="scaleway", base_url="http://scaleway.example", model="m"),
     )
     monkeypatch.setattr(
         pipeline_module, "load_step_config", lambda name, path: FAKE_CHOICE_STEP_CONFIG
@@ -386,7 +372,7 @@ def test_postprocess_strips_quotes_and_enforces_max_length():
     step_config = StepConfig(
         name="title",
         prompt="title.j2",
-        ai_role="title",
+        model="title",
         source_field="content",
         target_field="title",
         strip_quotes=True,
@@ -401,7 +387,7 @@ def test_postprocess_strips_quotes_and_enforces_max_length():
 FAKE_CONDITIONAL_STEP_CONFIG = StepConfig(
     name="kontonummer",
     prompt="title.j2",
-    ai_role="title",
+    model="title",
     source_field="content",
     target_field="title",
     condition={"document_type": "Kontoauszug"},
@@ -421,7 +407,7 @@ def test_process_step_skips_when_condition_not_met(monkeypatch, tmp_path):
     monkeypatch.setattr(
         pipeline_module,
         "load_ai_config",
-        lambda role, path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
+        lambda model, path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
     )
     monkeypatch.setattr(
         pipeline_module, "load_step_config", lambda name, path: FAKE_CONDITIONAL_STEP_CONFIG
@@ -451,7 +437,7 @@ def test_process_step_runs_when_condition_met(monkeypatch, tmp_path):
     monkeypatch.setattr(
         pipeline_module,
         "load_ai_config",
-        lambda role, path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
+        lambda model, path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
     )
     monkeypatch.setattr(
         pipeline_module, "load_step_config", lambda name, path: FAKE_CONDITIONAL_STEP_CONFIG
@@ -470,7 +456,7 @@ def test_process_step_runs_when_condition_met(monkeypatch, tmp_path):
 FAKE_OCR_STEP_CONFIG = StepConfig(
     name="ocr_check",
     prompt=None,
-    ai_role=None,
+    model=None,
     source_field="content",
     target_field="content",
     quality_check="heuristic",
@@ -580,11 +566,28 @@ def test_process_pipeline_runs_all_steps_in_order_and_survives_a_failure(monkeyp
 
     monkeypatch.setattr(pipeline_module, "load_pipeline_order", lambda path: ["a", "broken", "b"])
     monkeypatch.setattr(pipeline_module, "process_step", fake_process_step)
+    monkeypatch.setattr(pipeline_module, "load_step_config", lambda name, path: FAKE_STEP_CONFIG)
 
     results = pipeline_module.process_pipeline(document_id=1, db_path=str(tmp_path / "test.db"))
 
     assert call_order == ["a", "broken", "b"]
     assert results == {"a": "ok:a", "broken": None, "b": "ok:b"}
+
+
+def test_process_pipeline_runs_only_given_step_names(monkeypatch, tmp_path):
+    call_order = []
+    monkeypatch.setattr(pipeline_module, "load_pipeline_order", lambda path: ["a", "b", "c"])
+    monkeypatch.setattr(
+        pipeline_module,
+        "process_step",
+        lambda step_name, document_id, **kwargs: call_order.append(step_name),
+    )
+
+    pipeline_module.process_pipeline(
+        document_id=1, step_names=["c", "a"], db_path=str(tmp_path / "test.db")
+    )
+
+    assert call_order == ["c", "a"]
 
 
 def test_process_pipeline_aborts_immediately_on_missing_document(monkeypatch, tmp_path):
@@ -613,7 +616,7 @@ def test_process_pipeline_aborts_immediately_on_missing_document(monkeypatch, tm
 FAKE_MULTI_CHOICE_STEP_CONFIG = StepConfig(
     name="tags",
     prompt="tags.j2",
-    ai_role="tags",
+    model="tags",
     source_field="content",
     target_field="tags",
     candidates_endpoint="tags",
@@ -636,7 +639,7 @@ def _patch_multi_choice_common(monkeypatch, fake_paperless, fake_ai):
     monkeypatch.setattr(
         pipeline_module,
         "load_ai_config",
-        lambda role, path: AIConfig(provider="scaleway", base_url="http://scaleway.example", model="m"),
+        lambda model, path: AIConfig(provider="scaleway", base_url="http://scaleway.example", model="m"),
     )
     monkeypatch.setattr(
         pipeline_module, "load_step_config", lambda name, path: FAKE_MULTI_CHOICE_STEP_CONFIG
@@ -767,7 +770,7 @@ def test_multi_choice_step_never_deletes_protected_candidates(monkeypatch, tmp_p
     protected_config = StepConfig(
         name="tags",
         prompt="tags.j2",
-        ai_role="tags",
+        model="tags",
         source_field="content",
         target_field="tags",
         candidates_endpoint="tags",
@@ -843,7 +846,7 @@ def test_step_results_store_token_usage_and_cost(monkeypatch, tmp_path):
     monkeypatch.setattr(
         pipeline_module,
         "load_ai_config",
-        lambda role, path: AIConfig(
+        lambda model, path: AIConfig(
             provider="scaleway",
             base_url="http://scaleway.example",
             model="m",
@@ -868,12 +871,12 @@ def test_step_results_store_token_usage_and_cost(monkeypatch, tmp_path):
 FAKE_CORRESPONDENT_STEP_CONFIG = StepConfig(
     name="correspondent",
     prompt="correspondent-step1.j2",
-    ai_role="correspondent_step1",
+    model="correspondent_step1",
     source_field="content",
     target_field="correspondent",
     candidates_endpoint="correspondents",
     prompt_step2="correspondent-step2.j2",
-    ai_role_step2="correspondent_step2",
+    model_step2="correspondent_step2",
     fuzzy_assign_min_score=95.0,
     fuzzy_assign_min_gap=8.0,
     fuzzy_review_min_score=80.0,
@@ -902,7 +905,7 @@ def _patch_correspondent_common(monkeypatch, fake_paperless, ai_client_by_role):
     monkeypatch.setattr(
         pipeline_module,
         "load_ai_config",
-        lambda role, path: AIConfig(provider="scaleway", base_url="http://scaleway.example", model=role),
+        lambda model, path: AIConfig(provider="scaleway", base_url="http://scaleway.example", model=model),
     )
     monkeypatch.setattr(
         pipeline_module, "load_step_config", lambda name, path: FAKE_CORRESPONDENT_STEP_CONFIG
@@ -1081,172 +1084,144 @@ def test_correspondent_step_only_passes_plausible_candidates_to_step2(monkeypatc
     assert set(captured["correspondent_names"]) == {"Mueller GmbH", "Mueller Handel GmbH"}
 
 
-def _patch_batch_common(monkeypatch, fake_paperless):
+FAKE_ADD_TAGS_STEP_CONFIG = StepConfig(
+    name="mark_done",
+    source_field="",
+    target_field="tags",
+    add_tags=["archivlotse-done"],
+    requires_previous_success=True,
+)
+
+TAGS_WITH_DONE = TAGS + [{"id": 9, "name": "archivlotse-done"}]
+
+
+def _patch_add_tags_common(monkeypatch, fake_paperless):
     monkeypatch.setattr(
         pipeline_module,
         "load_paperless_config",
         lambda path: PaperlessConfig(url="http://paperless.example", token="t"),
     )
+    monkeypatch.setattr(pipeline_module, "load_step_config", lambda name, path: FAKE_ADD_TAGS_STEP_CONFIG)
     monkeypatch.setattr(pipeline_module, "PaperlessClient", lambda config: fake_paperless)
+    # Kein KI-Aufruf erlaubt.
+    monkeypatch.setattr(pipeline_module, "load_ai_config", lambda *a: (_ for _ in ()).throw(AssertionError))
 
 
-# TODO hat id=3 in TAGS - jedes Batch-Testdokument traegt diesen Tag,
-# sofern der Test nicht explizit etwas anderes simuliert (siehe
-# test_process_batch_by_tag_skips_document_that_lost_the_tag).
-_TAGGED = {"tags": [3]}
+def test_add_tags_step_adds_tag_keeps_existing_and_audits(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(tags=TAGS_WITH_DONE)
+    fake_paperless.document["tags"] = [3, 1]
+    _patch_add_tags_common(monkeypatch, fake_paperless)
+    db_path = str(tmp_path / "test.db")
+
+    result = pipeline_module.process_step(step_name="mark_done", document_id=1, db_path=db_path)
+
+    assert fake_paperless.update_calls == [("tags", [1, 3, 9])]
+    assert result == "Auto, TODO, archivlotse-done"
+    conn = pipeline_module.init_db(db_path)
+    rows = conn.execute("SELECT old_value, new_value FROM audit_log").fetchall()
+    assert [tuple(row) for row in rows] == [("Auto, TODO", "Auto, TODO, archivlotse-done")]
+
+    # Zweiter Lauf: Tag schon gesetzt -> kein erneuter PATCH.
+    pipeline_module.process_step(step_name="mark_done", document_id=1, db_path=db_path)
+    assert len(fake_paperless.update_calls) == 1
 
 
-def test_process_batch_by_tag_runs_pipeline_per_document_in_order(monkeypatch, tmp_path):
-    fake_paperless = FakePaperlessClient(
-        tags=TAGS,
-        documents_by_tag={3: [{"id": 10}, {"id": 20}, {"id": 30}]},
-        documents_by_id={10: _TAGGED, 20: _TAGGED, 30: _TAGGED},
+def test_add_tags_step_dry_run_writes_nothing(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(tags=TAGS_WITH_DONE)
+    _patch_add_tags_common(monkeypatch, fake_paperless)
+
+    pipeline_module.process_step(
+        step_name="mark_done", document_id=1, dry_run=True, db_path=str(tmp_path / "test.db")
     )
-    _patch_batch_common(monkeypatch, fake_paperless)
 
+    assert fake_paperless.update_calls == []
+
+
+def test_add_tags_step_refetches_once_then_fails_for_missing_tag(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(tags=TAGS)
+    _patch_add_tags_common(monkeypatch, fake_paperless)
+
+    with pytest.raises(ValueError, match="archivlotse-done"):
+        pipeline_module.process_step(step_name="mark_done", document_id=1, db_path=str(tmp_path / "test.db"))
+
+    # Erst (leerer Cache) frisch geladen, dann wegen des fehlenden Tags
+    # noch einmal am Cache vorbei - ein gerade angelegter Tag wird so gefunden.
+    assert fake_paperless.list_tags_calls == 2
+    assert fake_paperless.update_calls == []
+
+
+def test_process_pipeline_skips_requires_previous_success_step_after_failure(monkeypatch, tmp_path):
     call_order = []
 
-    def fake_process_pipeline(document_id, **kwargs):
-        call_order.append(document_id)
-        return {"title": f"ok:{document_id}"}
-
-    monkeypatch.setattr(pipeline_module, "process_pipeline", fake_process_pipeline)
-
-    results = pipeline_module.process_batch_by_tag(
-        tag_name="TODO", db_path=str(tmp_path / "test.db")
-    )
-
-    assert fake_paperless.list_documents_by_tag_id_calls == [3]  # ID von "TODO"
-    assert call_order == [10, 20, 30]
-    assert results == {10: {"title": "ok:10"}, 20: {"title": "ok:20"}, 30: {"title": "ok:30"}}
-
-
-def test_process_batch_by_tag_processes_smallest_id_first(monkeypatch, tmp_path):
-    # Paperless liefert die Dokumente absichtlich NICHT in ID-Reihenfolge -
-    # die Batch-Funktion muss trotzdem aufsteigend verarbeiten.
-    fake_paperless = FakePaperlessClient(
-        tags=TAGS,
-        documents_by_tag={3: [{"id": 30}, {"id": 10}, {"id": 20}]},
-        documents_by_id={10: _TAGGED, 20: _TAGGED, 30: _TAGGED},
-    )
-    _patch_batch_common(monkeypatch, fake_paperless)
-
-    call_order = []
-    monkeypatch.setattr(
-        pipeline_module,
-        "process_pipeline",
-        lambda document_id, **kwargs: call_order.append(document_id),
-    )
-
-    pipeline_module.process_batch_by_tag(tag_name="TODO", db_path=str(tmp_path / "test.db"))
-
-    assert call_order == [10, 20, 30]
-
-
-def test_process_batch_by_tag_skips_document_that_lost_the_tag(monkeypatch, tmp_path):
-    fake_paperless = FakePaperlessClient(
-        tags=TAGS,
-        documents_by_tag={3: [{"id": 10}, {"id": 20}, {"id": 30}]},
-        # Dokument 20 trug den Tag beim ersten Abruf, hat ihn inzwischen
-        # aber nicht mehr (z.B. von Hand entfernt, waehrend der Batch lief).
-        documents_by_id={10: _TAGGED, 20: {"tags": []}, 30: _TAGGED},
-    )
-    _patch_batch_common(monkeypatch, fake_paperless)
-
-    call_order = []
-    monkeypatch.setattr(
-        pipeline_module,
-        "process_pipeline",
-        lambda document_id, **kwargs: call_order.append(document_id) or {"title": f"ok:{document_id}"},
-    )
-
-    results = pipeline_module.process_batch_by_tag(tag_name="TODO", db_path=str(tmp_path / "test.db"))
-
-    # Dokument 20 wird NICHT prozessiert, obwohl es in der urspruenglichen
-    # Trefferliste war - der frische Tag-Check direkt davor hat es erkannt.
-    assert call_order == [10, 30]
-    assert results == {10: {"title": "ok:10"}, 20: None, 30: {"title": "ok:30"}}
-
-
-def test_process_batch_by_tag_uses_single_step_when_given(monkeypatch, tmp_path):
-    fake_paperless = FakePaperlessClient(
-        tags=TAGS, documents_by_tag={3: [{"id": 10}]}, documents_by_id={10: _TAGGED}
-    )
-    _patch_batch_common(monkeypatch, fake_paperless)
-
-    captured = {}
-
-    def fake_process_step(**kwargs):
-        captured.update(kwargs)
+    def fake_process_step(step_name, document_id, **kwargs):
+        call_order.append(step_name)
+        if step_name == "broken":
+            raise RuntimeError("boom")
         return "ok"
 
     monkeypatch.setattr(pipeline_module, "process_step", fake_process_step)
-
-    pipeline_module.process_batch_by_tag(
-        tag_name="TODO", step_name="title", ai_role="precise", db_path=str(tmp_path / "test.db")
-    )
-
-    assert captured["step_name"] == "title"
-    assert captured["document_id"] == 10
-    assert captured["ai_role"] == "precise"
-
-
-def test_process_batch_by_tag_continues_after_one_document_fails(monkeypatch, tmp_path):
-    fake_paperless = FakePaperlessClient(
-        tags=TAGS,
-        documents_by_tag={3: [{"id": 10}, {"id": 20}, {"id": 30}]},
-        documents_by_id={10: _TAGGED, 20: _TAGGED, 30: _TAGGED},
-    )
-    _patch_batch_common(monkeypatch, fake_paperless)
-
-    call_order = []
-
-    def fake_process_pipeline(document_id, **kwargs):
-        call_order.append(document_id)
-        if document_id == 20:
-            raise RuntimeError("boom")
-        return {"title": f"ok:{document_id}"}
-
-    monkeypatch.setattr(pipeline_module, "process_pipeline", fake_process_pipeline)
-
-    results = pipeline_module.process_batch_by_tag(
-        tag_name="TODO", db_path=str(tmp_path / "test.db")
-    )
-
-    assert call_order == [10, 20, 30]
-    assert results == {10: {"title": "ok:10"}, 20: None, 30: {"title": "ok:30"}}
-
-
-def test_process_batch_by_tag_respects_limit(monkeypatch, tmp_path):
-    fake_paperless = FakePaperlessClient(
-        tags=TAGS,
-        documents_by_tag={3: [{"id": 10}, {"id": 20}, {"id": 30}]},
-        documents_by_id={10: _TAGGED, 20: _TAGGED, 30: _TAGGED},
-    )
-    _patch_batch_common(monkeypatch, fake_paperless)
-
-    call_order = []
     monkeypatch.setattr(
         pipeline_module,
-        "process_pipeline",
-        lambda document_id, **kwargs: call_order.append(document_id),
+        "load_step_config",
+        lambda name, path: FAKE_ADD_TAGS_STEP_CONFIG if name == "mark_done" else FAKE_STEP_CONFIG,
     )
 
-    pipeline_module.process_batch_by_tag(
-        tag_name="TODO", limit=2, db_path=str(tmp_path / "test.db")
+    results = pipeline_module.process_pipeline(
+        document_id=1, step_names=["a", "broken", "b", "mark_done"], db_path=str(tmp_path / "test.db")
     )
+    assert call_order == ["a", "broken", "b"]
+    assert results["mark_done"] is None
 
-    assert call_order == [10, 20]
+    call_order.clear()
+    pipeline_module.process_pipeline(
+        document_id=1, step_names=["a", "mark_done"], db_path=str(tmp_path / "test.db")
+    )
+    assert call_order == ["a", "mark_done"]
 
 
-def test_process_batch_by_tag_raises_for_unknown_tag(monkeypatch, tmp_path):
-    fake_paperless = FakePaperlessClient(tags=TAGS)
-    _patch_batch_common(monkeypatch, fake_paperless)
+def test_process_pipeline_does_not_abort_on_404_from_other_service(monkeypatch, tmp_path):
+    # Ollama antwortet z.B. mit 404 auf ein unbekanntes Modell - das heisst
+    # NICHT, dass das Paperless-Dokument fehlt.
+    call_order = []
 
-    try:
-        pipeline_module.process_batch_by_tag(
-            tag_name="GibtEsNicht", db_path=str(tmp_path / "test.db")
-        )
-        assert False, "sollte ValueError auslösen"
-    except ValueError as exc:
-        assert "GibtEsNicht" in str(exc)
+    def fake_process_step(step_name, document_id, **kwargs):
+        call_order.append(step_name)
+        if step_name == "a":
+            request = httpx.Request("POST", "http://127.0.0.1:11434/api/generate")
+            response = httpx.Response(404, request=request, text='{"error":"model not found"}')
+            raise httpx.HTTPStatusError("404", request=request, response=response)
+        return "ok"
+
+    monkeypatch.setattr(pipeline_module, "load_pipeline_order", lambda path: ["a", "b"])
+    monkeypatch.setattr(pipeline_module, "load_step_config", lambda name, path: FAKE_STEP_CONFIG)
+    monkeypatch.setattr(pipeline_module, "process_step", fake_process_step)
+
+    pipeline_module.process_pipeline(document_id=1, db_path=str(tmp_path / "test.db"))
+
+    assert call_order == ["a", "b"]
+
+
+def test_process_pipeline_logs_unreachable_service_as_one_line(monkeypatch, tmp_path, caplog):
+    def fake_process_step(step_name, document_id, **kwargs):
+        if step_name == "title":
+            request = httpx.Request("POST", "http://127.0.0.1:11434/api/generate")
+            raise httpx.ConnectError("[Errno 111] Connection refused", request=request)
+        raise RuntimeError("echter Bug")
+
+    monkeypatch.setattr(pipeline_module, "load_pipeline_order", lambda path: ["title", "buggy"])
+    monkeypatch.setattr(pipeline_module, "load_step_config", lambda name, path: FAKE_STEP_CONFIG)
+    monkeypatch.setattr(pipeline_module, "process_step", fake_process_step)
+
+    with caplog.at_level("INFO", logger="archivlotse"):
+        pipeline_module.process_pipeline(document_id=7, db_path=str(tmp_path / "test.db"))
+
+    errors = [record for record in caplog.records if record.levelname == "ERROR"]
+    assert len(errors) == 2
+    unreachable, bug = errors
+    assert "Dokument 7, Schritt 'title'" in unreachable.getMessage()
+    assert (
+        "Dienst nicht erreichbar (POST http://127.0.0.1:11434/api/generate): "
+        "[Errno 111] Connection refused" in unreachable.getMessage()
+    )
+    assert unreachable.exc_info is None  # kein Traceback ohne --verbose
+    assert bug.exc_info is not None  # unerwarteter Fehler behaelt den Traceback

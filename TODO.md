@@ -38,7 +38,7 @@ Aktuell nur als Platzhalter in `_process_ocr_step` vorgesehen - wirft
 `heuristic` setzt. Soll die Grenzen der `wordfreq`-Heuristik abfedern
 (siehe `ocr_quality.py`-Docstring: zahlenlastige, aber eigentlich gute
 Dokumente, oder jargon-/eigennamenlastige Dokumente, die trotz guter
-Qualität niedrig scoren). Braucht einen eigenen Prompt + eine AI-Rolle,
+Qualität niedrig scoren). Braucht einen eigenen Prompt + ein Modell,
 die den vorhandenen Text bewertet (gut/schlecht), analog zu den anderen
 KI-Schritten.
 

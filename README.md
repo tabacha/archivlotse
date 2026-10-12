@@ -133,10 +133,11 @@ Diese Datei hat zwei Abschnitte:
 - **`providers:`** – hier trägst du einmal pro KI-Backend die
   Zugangsdaten ein (z. B. ein lokales Ollama und einen Cloud-Dienst wie
   Scaleway). Die Zugangsdaten stehen hier nur **einmal** pro Provider.
-- **`roles:`** – hier legst du pro Aufgabe ("Rolle") fest, welcher
-  Provider und welches Modell benutzt wird. Der Titel-Schritt benutzt die
-  Rolle `title`. Mehrere Rollen können sich denselben Provider (und damit
-  dieselben Zugangsdaten) teilen, ohne sie zu wiederholen.
+- **`models:`** – hier trägst du jedes benutzte Modell (Schlüssel = der
+  Modellname, wie ihn der Provider erwartet) mit seinem Provider ein.
+  Mehrere Modelle können sich denselben Provider (und damit dieselben
+  Zugangsdaten) teilen, ohne sie zu wiederholen. Welcher Schritt welches
+  Modell benutzt, steht direkt in `config/steps.yaml` (`model:`).
 
 Beispiel: ein Modell läuft lokal über Ollama, ein anderes in der Cloud
 über Scaleway – die Scaleway-Zugangsdaten stehen dabei nur einmal:
@@ -159,31 +160,43 @@ providers:
     access_key_id: "SCWxxxxxxxxxxxxxxxxx"
     secret_key: "${SCALEWAY_SECRET_KEY}"
 
-roles:
-  title:
+models:
+  "qwen3:4b-instruct": # Name des Modells, das in Ollama geladen ist
     provider: ollama_lokal
-    model: "llama3.1" # Name des Modells, das in Ollama geladen ist
 
-  document_type:
+  mistral-small-3.2-24b-instruct-2506: # guenstig, reicht fuer Klassifizierung
     provider: scaleway
-    model: "mistral-small-3.2-24b-instruct-2506" # guenstig, reicht fuer Klassifizierung
+    price_per_1m_input: 0.15
+    price_per_1m_output: 0.35
 
-  precise:
+  llama-3.3-70b-instruct:
     provider: scaleway
-    model: "llama-3.3-70b-instruct" # wird z.B. mit --ai-role precise genutzt
+    price_per_1m_input: 0.90
+    price_per_1m_output: 0.90
 ```
 
-Du brauchst nur die Provider zu pflegen, die du tatsächlich in `roles:`
-verwendest. Welche Rolle der Titel-Schritt benutzt, lässt sich auch beim
-Aufruf überschreiben (siehe unten, `--ai-role`) – Standard ist `title`.
+Du brauchst nur die Provider und Modelle zu pflegen, die in
+`config/steps.yaml` tatsächlich verwendet werden. Welches Modell ein
+Schritt benutzt, lässt sich auch beim Aufruf überschreiben (siehe unten,
+`--model`).
 
-**Kosten pro KI-Aufruf:** trägst du bei einer Rolle `price_per_1m_input`
+Gibt es dasselbe Modell bei zwei Providern, bekommt einer der Einträge
+einen eigenen Schlüssel und den echten Modellnamen per `model:`:
+
+```yaml
+models:
+  mistral-small-lokal:
+    provider: ollama_lokal
+    model: "mistral-small3.2:24b"
+```
+
+**Kosten pro KI-Aufruf:** trägst du bei einem Modell `price_per_1m_input`
 und `price_per_1m_output` ein (US-Dollar je 1 Million Tokens, siehe
 Scaleways Preisliste), schätzt ArchivLotse die Kosten jedes Aufrufs
 anhand der tatsächlich verbrauchten Tokens und loggt sie
 (`Tokenverbrauch prompt=... completion=..., geschätzte Kosten: $...`)
 sowie in `step_results` (`prompt_tokens`, `completion_tokens`,
-`estimated_cost_usd`). Für `ollama`-Rollen ist das nicht nötig – lokale
+`estimated_cost_usd`). Für `ollama`-Modelle ist das nicht nötig – lokale
 Anfragen werden immer als `$0` gezählt. Ohne hinterlegten Preis wird nur
 der Tokenverbrauch geloggt, die Kosten als „unbekannt" markiert.
 
@@ -217,7 +230,7 @@ steps:
     target_field: title # Paperless-Feld, das mit dem Ergebnis beschrieben wird
 
     prompt: title.j2 # Datei in config/prompts/
-    ai_role: title # Rolle aus config/ai.yaml
+    model: "qwen3:4b-instruct" # Modell aus config/ai.yaml (models:)
 
     preprocessing:
       max_input_chars: 8000 # Eingabetext wird vorher auf so viele Zeichen gekuerzt
@@ -237,8 +250,8 @@ maximale Titellänge anpassen möchtest.
 **Einen neuen Freitext-Schritt hinzufügen** geht rein über Config, ohne
 Python-Code zu ändern: eine `.j2`-Prompt-Datei unter `config/prompts/`
 anlegen, einen neuen Eintrag unter `steps:` ergänzen (mit `source_field`,
-`target_field`, `prompt`, `ai_role`), ihn in `pipeline:` einsortieren und
-bei Bedarf eine passende Rolle in `config/ai.yaml`. Der Prompt bekommt:
+`target_field`, `prompt`, `model`), ihn in `pipeline:` einsortieren und
+das Modell ggf. unter `models:` in `config/ai.yaml` ergänzen. Der Prompt bekommt:
 
 - `{{ input_text }}`: den (ggf. gekürzten) Inhalt von `source_field`.
 - `{{ document_type_name }}`: den Namen des aktuell gesetzten
@@ -275,7 +288,7 @@ freien Text zu erzeugen:
     target_field: document_type
 
     prompt: document_type.j2
-    ai_role: document_type
+    model: "mistral-small-3.2-24b-instruct-2506"
 
     # Laedt die vorhandenen Dokumenttypen ueber die Paperless-API und gibt
     # sie dem Prompt als Kandidatenliste mit. Ein Vorschlag, der zu keinem
@@ -306,7 +319,7 @@ true` – die KI darf mehrere, durch Komma getrennte Tags vorschlagen:
     target_field: tags
 
     prompt: tags.j2
-    ai_role: tags
+    model: "qwen3.8-27b"
 
     candidates_endpoint: tags
     multi: true # Mehrfachauswahl statt genau eines Werts
@@ -335,7 +348,7 @@ Unterschiede zum einfachen Auswahl-Schritt:
   beiden Label-Zeilen) werden weiterhin als reine Hinzufügen-Liste
   interpretiert – falls das Modell das Format trotz Anweisung ignoriert.
 
-**OCR-Qualitätsschritt `ocr_check`:** kein `prompt`/`ai_role` nötig, da
+**OCR-Qualitätsschritt `ocr_check`:** kein `prompt`/`model` nötig, da
 kein KI-Aufruf stattfindet:
 
 ```yaml
@@ -371,6 +384,28 @@ Score **nicht** benutzt, um zu entscheiden, ob das Docling-Ergebnis
 übernommen wird – nur, um zu entscheiden, ob überhaupt ein Re-OCR-Versuch
 lohnt. Bei Bedarf `quality_threshold` anpassen oder stichprobenartig mit
 `--dry-run --verbose` nachprüfen.
+
+**Tag-Setz-Schritt `mark_done`:** ebenfalls ohne KI – hängt feste,
+**in Paperless bereits vorhandene** Tags an das Dokument an (vorhandene
+Tags bleiben erhalten). Fehlt ein Tag in Paperless, bricht der Schritt
+mit einer Fehlermeldung ab; ArchivLotse legt ihn **nicht** selbst an –
+`archivlotse-done` also einmal von Hand in Paperless anlegen.
+
+```yaml
+  mark_done:
+    target_field: tags
+    add_tags:
+      - archivlotse-done
+    # nur ausfuehren, wenn kein frueherer Schritt dieses Laufs
+    # fehlgeschlagen ist (gilt fuer die ganze pipeline: und Batch-Jobs,
+    # nicht fuer "--step mark_done")
+    requires_previous_success: true
+```
+
+`mark_done` steht als letzter Schritt in `pipeline:`. Zusammen mit
+`exclude_tags: [archivlotse-done]` im Batch-Job `todo` (siehe
+`config/batch.yaml`) wird so jedes Dokument nur einmal komplett
+durchlaufen.
 
 ## 4. Erster Testlauf (Dry-Run)
 
@@ -412,8 +447,9 @@ sich der Eingabetext, der Prompt oder das Modell geändert haben, wird
 **keine** erneute KI-Anfrage gestellt – ArchivLotse nutzt das gespeicherte
 Ergebnis aus der letzten Berechnung.
 
-Mit `--ai-role <name>` kannst du eine andere Rolle aus `config/ai.yaml`
-für diesen Lauf benutzen, z. B. `archivlotse process 6023 --step title --ai-role precise`.
+Mit `--model <name>` kannst du ein anderes Modell aus `config/ai.yaml`
+(`models:`) für diesen Lauf benutzen, z. B.
+`archivlotse process 6023 --step title --model llama-3.3-70b-instruct`.
 
 ### Erneut berechnen trotz Cache (`--force`)
 
@@ -451,23 +487,48 @@ unangetastet.
 
 ### Mehrere Dokumente auf einmal verarbeiten (Batch)
 
-Statt einer einzelnen `document_id` kannst du mit `--tag` alle Dokumente
-verarbeiten, die in Paperless einen bestimmten Tag tragen (z. B. `TODO`
-für "noch zu bearbeiten") – nacheinander, nicht parallel:
+`archivlotse process` bearbeitet immer genau ein Dokument. Für viele
+Dokumente gibt es `archivlotse batch`, das die Jobs aus
+`config/batch.yaml` ausführt – nacheinander, nicht parallel, jeweils
+kleinste Dokument-ID zuerst:
 
-```bash
-archivlotse process --tag TODO --dry-run
-archivlotse process --tag TODO
-archivlotse process --tag TODO --step document_type   # nur ein Schritt für alle
-archivlotse process --tag TODO --limit 10              # nur die ersten 10
+```yaml
+jobs:
+  # Alles mit Tag TODO, aber ohne Tag archivlotse-done: ganze Pipeline
+  todo:
+    filter:
+      tags: [TODO]                    # muss ALLE diese Tags tragen
+      exclude_tags: [archivlotse-done] # darf KEINEN dieser Tags tragen
+
+  # Titel wie 20260928_124530 (Scanner-Dateiname): nur neuen Titel berechnen
+  scan_titles:
+    filter:
+      title_regex: '^\d{4}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])_\d+$'
+    steps: [title]                    # optional, Standard: ganze pipeline:
+    # limit: 50                       # optional: höchstens so viele pro Lauf
 ```
 
-Scheitert die Verarbeitung eines einzelnen Dokuments (z. B. wegen eines
-unerwarteten Inhalts), wird das geloggt und mit dem nächsten Dokument
-weitergemacht – ein einzelnes Problemdokument bricht nicht den ganzen
-Stapel ab. ArchivLotse fügt den Tag dabei weder hinzu noch entfernt es
-ihn – ob und wie du erledigte Dokumente danach selbst kennzeichnest,
-bleibt dir überlassen.
+Jeder Job braucht mindestens `tags` oder `title_regex` (damit nicht aus
+Versehen das ganze Archiv verarbeitet wird). Die Regex in einfache
+Anführungszeichen setzen, sonst verändert YAML die Backslashes. Ein Tag in
+`exclude_tags`, den es in Paperless noch nicht gibt, schließt einfach
+nichts aus (mit Warnung im Log); ein Tag in `tags`, den es nicht gibt,
+ist dagegen ein Fehler.
+
+```bash
+archivlotse batch --dry-run             # alle Jobs der Reihe nach, nur testen
+archivlotse batch                       # alle Jobs
+archivlotse batch scan_titles           # nur dieser Job
+archivlotse batch todo --limit 10       # höchstens 10 Dokumente (überschreibt limit:)
+```
+
+Direkt vor jedem Dokument wird der Filter erneut geprüft: passt ein
+Dokument inzwischen nicht mehr (z. B. Tag entfernt, oder Titel schon von
+einem früheren Job im selben Lauf neu gesetzt), wird es übersprungen.
+Scheitert die Verarbeitung eines einzelnen Dokuments, wird das geloggt und
+mit dem nächsten weitergemacht. ArchivLotse setzt oder entfernt dabei
+selbst **keine** Tags (auch kein `archivlotse-done`) – ob und wie du
+erledigte Dokumente kennzeichnest, bleibt dir überlassen.
 
 ## 6. Wo landen die Daten?
 
@@ -516,6 +577,13 @@ zusätzlich die Umgebungsvariable:
 ARCHIVLOTSE_LOG_LEVEL=DEBUG archivlotse process 6023 --step title --dry-run
 ```
 
+Ist ein Dienst nicht erreichbar (Ollama, Docling, Scaleway, Paperless),
+läuft in eine Zeitüberschreitung oder antwortet mit einem HTTP-Fehler,
+erscheint das als **eine** Fehlerzeile mit der betroffenen URL, z. B.
+`Dienst nicht erreichbar (POST http://127.0.0.1:11434/api/generate): [Errno 111] Connection refused`.
+Den vollständigen Stacktrace dazu gibt es nur mit `-v`. Nur unerwartete
+Fehler (also vermutlich Programmfehler) werden immer mit Stacktrace geloggt.
+
 ## 8. Typische Fehler
 
 - `FileNotFoundError: config/paperless.yaml` → Schritt 3 noch nicht
@@ -524,9 +592,12 @@ ARCHIVLOTSE_LOG_LEVEL=DEBUG archivlotse process 6023 --step title --dry-run
   falsch oder abgelaufen.
 - Verbindungsfehler zu Ollama → `base_url` des jeweiligen Providers in
   `config/ai.yaml` prüfen, erreichbar per `curl http://dein-host:11434`.
-- `Unbekannte Modellrolle ...` → die mit `--ai-role` angegebene (oder die
-  Standard-Rolle `title`) fehlt unter `roles:` in `config/ai.yaml`.
-- `Rolle ... verweist auf unbekannten Provider ...` → der unter `roles:`
+- `Unbekanntes Modell ...` → das mit `--model` angegebene (oder das in
+  `config/steps.yaml` beim Schritt eingetragene) Modell fehlt unter
+  `models:` in `config/ai.yaml`.
+- `... benutzt noch das alte 'roles:'-Format` → `config/ai.yaml` von
+  `roles:` auf `models:` umstellen (siehe `config/ai.example.yaml`).
+- `Modell ... verweist auf unbekannten Provider ...` → der unter `models:`
   angegebene `provider:`-Name taucht nicht unter `providers:` auf (Tippfehler?).
 - `ValueError: Scaleway provider requires 'secret_key'` → `secret_key`
   beim jeweiligen Scaleway-Provider in `config/ai.yaml` ausfüllen.

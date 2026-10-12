@@ -12,7 +12,7 @@ class StepConfig:
     source_field: str
     target_field: str
     prompt: str | None = None
-    ai_role: str | None = None
+    model: str | None = None
     max_input_chars: int = 8000
     strip_quotes: bool = True
     max_output_length: int | None = None
@@ -36,14 +36,14 @@ class StepConfig:
     # entspricht, z.B. {"document_type": "Kontoauszug"}.
     condition: dict[str, str] | None = None
     # Nur fuer Korrespondenten-Schritte (prompt_step2 gesetzt): zweistufige
-    # Erkennung - KI (prompt/ai_role) ermittelt einen wahrscheinlichen Namen
+    # Erkennung - KI (prompt/model) ermittelt einen wahrscheinlichen Namen
     # aus dem Text, RapidFuzz vergleicht ihn deterministisch mit den
     # vorhandenen Kandidaten (candidates_endpoint); nur bei mehrdeutigem
-    # Ergebnis wird eine zweite KI-Abfrage (prompt_step2/ai_role_step2) mit
+    # Ergebnis wird eine zweite KI-Abfrage (prompt_step2/model_step2) mit
     # den paar aehnlichsten Kandidaten gestellt. Schwellenwerte sind
     # bewusst Config, nicht Code - siehe TODO_paperless_korrespondenten_pipeline.md.
     prompt_step2: str | None = None
-    ai_role_step2: str | None = None
+    model_step2: str | None = None
     # Score (0-100) UND Abstand zum zweitbesten Treffer, ab dem ein
     # Fuzzy-Treffer ohne zweite KI-Abfrage direkt uebernommen wird.
     fuzzy_assign_min_score: float = 95.0
@@ -55,6 +55,14 @@ class StepConfig:
     # Wie viele der aehnlichsten Kandidaten der zweiten KI-Abfrage
     # hoechstens vorgelegt werden.
     fuzzy_candidate_limit: int = 5
+    # Nur fuer Tag-Setz-Schritte (add_tags gesetzt): diese (in Paperless
+    # bereits vorhandenen) Tags per Name an das Dokument anhaengen - kein
+    # KI-Aufruf, keine Quelle noetig. Fehlende Tags werden NICHT angelegt.
+    add_tags: list[str] = field(default_factory=list)
+    # Innerhalb eines Pipeline-Laufs (process_pipeline) nur ausfuehren, wenn
+    # kein frueherer Schritt dieses Laufs fehlgeschlagen ist - z.B. damit
+    # ein "erledigt"-Tag nicht nach einem gescheiterten Schritt gesetzt wird.
+    requires_previous_success: bool = False
 
 
 def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepConfig:
@@ -76,7 +84,7 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
     rather than applied.
 
     If quality_check is set (e.g. "heuristic"), this is instead an OCR
-    quality-check/improve step: no AI role/prompt is used at all. See
+    quality-check/improve step: no AI model/prompt is used at all. See
     archivlotse/ocr_quality.py and archivlotse/docling.py.
 
     If condition is set, the step is skipped entirely (no AI/Docling
@@ -87,11 +95,19 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
     enforced, config-level guarantee rather than relying on the prompt
     text alone.
 
+    If add_tags is set, this is an AI-free tag-adding step: the named,
+    already existing Paperless tags are added to target_field (which must
+    be "tags"); no source_field/prompt/model needed. A named tag that
+    doesn't exist in Paperless is an error, never auto-created.
+
+    requires_previous_success makes process_pipeline skip the step if an
+    earlier step in the same run raised (has no effect with --step).
+
     If prompt_step2 is set, this is a two-stage correspondent-style step:
-    the primary prompt/ai_role extracts a probable name from the text,
+    the primary prompt/model extracts a probable name from the text,
     RapidFuzz compares it deterministically against candidates_endpoint's
     list, and only an ambiguous fuzzy result (see fuzzy_*_min_* thresholds)
-    triggers a second AI call (prompt_step2/ai_role_step2) with the
+    triggers a second AI call (prompt_step2/model_step2) with the
     fuzzy_candidate_limit closest candidates to disambiguate. See
     TODO_paperless_korrespondenten_pipeline.md for the full decision logic.
     """
@@ -113,10 +129,10 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
 
     config = StepConfig(
         name=name,
-        source_field=step["source_field"],
+        source_field=step.get("source_field", ""),
         target_field=step["target_field"],
         prompt=step.get("prompt"),
-        ai_role=step.get("ai_role"),
+        model=step.get("model"),
         max_input_chars=preprocessing.get("max_input_chars", 8000),
         strip_quotes=postprocessing.get("strip_quotes", True),
         max_output_length=postprocessing.get("max_length"),
@@ -130,12 +146,21 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
         docling_force_ocr=docling.get("force_ocr", True),
         condition=step.get("condition"),
         prompt_step2=step.get("prompt_step2"),
-        ai_role_step2=step.get("ai_role_step2"),
+        model_step2=step.get("model_step2"),
         fuzzy_assign_min_score=step.get("fuzzy_assign_min_score", 95.0),
         fuzzy_assign_min_gap=step.get("fuzzy_assign_min_gap", 8.0),
         fuzzy_review_min_score=step.get("fuzzy_review_min_score", 80.0),
         fuzzy_candidate_limit=step.get("fuzzy_candidate_limit", 5),
+        add_tags=list(step.get("add_tags") or []),
+        requires_previous_success=step.get("requires_previous_success", False),
     )
+
+    if config.add_tags:
+        if config.target_field != "tags":
+            raise ValueError(f"Schritt {name!r}: 'add_tags' benötigt target_field: tags")
+        return config
+    if not config.source_field:
+        raise ValueError(f"Schritt {name!r}: 'source_field' ist erforderlich")
 
     if quality_check:
         if quality_check not in ("heuristic", "ai_judge"):
@@ -143,16 +168,16 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
                 f"Schritt {name!r}: unbekannter quality_check {quality_check!r} "
                 "(erwartet 'heuristic' oder 'ai_judge')"
             )
-        if quality_check == "ai_judge" and (not config.prompt or not config.ai_role):
+        if quality_check == "ai_judge" and (not config.prompt or not config.model):
             raise ValueError(
-                f"Schritt {name!r}: quality_check 'ai_judge' benötigt 'prompt' und 'ai_role'"
+                f"Schritt {name!r}: quality_check 'ai_judge' benötigt 'prompt' und 'model'"
             )
         if quality_check == "heuristic" and not config.docling_base_url:
             raise ValueError(f"Schritt {name!r}: quality_check benötigt 'docling.base_url'")
-    elif not config.prompt or not config.ai_role:
+    elif not config.prompt or not config.model:
         raise ValueError(
-            f"Schritt {name!r}: 'prompt' und 'ai_role' sind erforderlich (außer bei "
-            "quality_check-Schritten)"
+            f"Schritt {name!r}: 'prompt' und 'model' sind erforderlich (außer bei "
+            "quality_check- und add_tags-Schritten)"
         )
 
     if config.prompt_step2 and not config.candidates_endpoint:
@@ -160,9 +185,9 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
             f"Schritt {name!r}: 'prompt_step2' (zweistufige Korrespondenten-Erkennung) "
             "benötigt zusätzlich 'candidates_endpoint'"
         )
-    if config.prompt_step2 and not config.ai_role_step2:
+    if config.prompt_step2 and not config.model_step2:
         raise ValueError(
-            f"Schritt {name!r}: 'prompt_step2' benötigt zusätzlich 'ai_role_step2'"
+            f"Schritt {name!r}: 'prompt_step2' benötigt zusätzlich 'model_step2'"
         )
 
     return config

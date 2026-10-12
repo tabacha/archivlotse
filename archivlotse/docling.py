@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import httpx
 
+from .errors import ServiceError
+
 
 def _format_errors(errors: list[dict] | None) -> str:
     """Docling's response includes a structured "errors" list (component,
@@ -32,7 +34,7 @@ class DoclingClient:
         data = response.json()
         status = data.get("status")
         if status not in ("success", "partial_success"):
-            raise RuntimeError(
+            raise ServiceError(
                 f"Docling-Konvertierung fehlgeschlagen (status={status!r}): "
                 f"{_format_errors(data.get('errors'))}"
             )

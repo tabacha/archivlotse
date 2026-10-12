@@ -55,12 +55,19 @@ class PaperlessClient:
         request in practice."""
         return self._list_all("/api/correspondents/", params={"page_size": _LIST_PAGE_SIZE})
 
-    def list_documents_by_tag_id(self, tag_id: int) -> list[dict]:
-        """Fetch all documents (id, title, ...) tagged with the given tag
-        id, following pagination."""
-        return self._list_all(
-            "/api/documents/", params={"tags__id": tag_id, "page_size": _LIST_PAGE_SIZE}
-        )
+    def list_documents(
+        self, tags_all: list[int] | None = None, tags_none: list[int] | None = None
+    ) -> list[dict]:
+        """Fetch all documents (only id, title, tags) that carry ALL of
+        `tags_all` and NONE of `tags_none`, following pagination. Restricting
+        `fields` keeps the full OCR text out of what may be thousands of
+        list entries."""
+        params: dict = {"page_size": _LIST_PAGE_SIZE, "fields": "id,title,tags"}
+        if tags_all:
+            params["tags__id__all"] = ",".join(str(tag_id) for tag_id in tags_all)
+        if tags_none:
+            params["tags__id__none"] = ",".join(str(tag_id) for tag_id in tags_none)
+        return self._list_all("/api/documents/", params=params)
 
     def download_original(self, document_id: int) -> bytes:
         """Fetch the original (unmodified) document file."""

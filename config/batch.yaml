@@ -1,0 +1,40 @@
+# Batch-Jobs fuer "archivlotse batch": welche Dokumente (per Tag- und/oder
+# Titel-Filter) mit welchen Schritten aus config/steps.yaml verarbeitet
+# werden. "archivlotse batch" ohne Argument fuehrt alle Jobs in dieser
+# Reihenfolge aus, "archivlotse batch <job> ..." nur die genannten.
+#
+# Pro Job:
+#   filter:
+#     tags:         Dokument muss ALLE diese Tags tragen
+#     exclude_tags: Dokument darf KEINEN dieser Tags tragen (ein Tag, den es
+#                   in Paperless (noch) nicht gibt, schliesst nichts aus)
+#     title_regex:  Titel muss auf diesen regulaeren Ausdruck passen
+#                   (Python-Syntax; in einfachen Anfuehrungszeichen, damit
+#                   YAML die Backslashes nicht umdeutet)
+#     Mindestens "tags" oder "title_regex" ist Pflicht.
+#   steps:  nur diese Schritte (Standard: die ganze pipeline: aus steps.yaml)
+#   limit:  hoechstens so viele Dokumente pro Lauf (kleinste ID zuerst;
+#           "--limit" auf der Kommandozeile hat Vorrang)
+#
+# Unmittelbar vor jedem Dokument wird der Filter erneut geprueft - ein
+# Dokument, das inzwischen nicht mehr passt (z.B. Titel schon von einem
+# frueheren Job neu gesetzt), wird uebersprungen. ArchivLotse setzt oder
+# entfernt dabei selbst KEINE Tags.
+
+jobs:
+  # Alles, was als TODO markiert, aber noch nicht als erledigt markiert ist,
+  # durch die komplette Pipeline schicken.
+  todo:
+    filter:
+      tags: [TODO]
+      exclude_tags: [archivlotse-done]
+
+  # Dokumente, die noch den automatisch vergebenen Scanner-Dateinamen als
+  # Titel tragen (<Jahr><Monat><Tag>_<Zahl>_<Zahl>, z.B. 20260928_124530_0001), bekommen
+  # einen berechneten Titel.
+  scan_titles:
+    filter:
+      title_regex: '^\d{4}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])_\d+_\d+$'
+    steps:
+      - ocr_check
+      - title

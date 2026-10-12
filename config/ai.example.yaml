@@ -3,11 +3,12 @@
 # 1) Unter "providers" einmal pro Backend die Zugangsdaten eintragen,
 #    z.B. ein lokales Ollama und einen Cloud-Dienst wie Scaleway. Die
 #    Zugangsdaten stehen hier nur EINMAL pro Provider, auch wenn mehrere
-#    Rollen weiter unten denselben Cloud-Dienst benutzen.
+#    Modelle weiter unten denselben Cloud-Dienst benutzen.
 #
-# 2) Unter "roles" pro logischer Aufgabe festlegen, welcher Provider und
-#    welches Modell benutzt wird. Jede Rolle wird in config/steps.yaml
-#    von genau einem Schritt referenziert (z.B. "title", "document_type").
+# 2) Unter "models" jedes benutzte Modell (Schluessel = Modellname, wie
+#    ihn der Provider erwartet) mit seinem Provider eintragen. Welcher
+#    Schritt welches Modell benutzt, steht in config/steps.yaml
+#    ("model:", beim Korrespondenten-Schritt zusaetzlich "model_step2:").
 
 providers:
   ollama_lokal:
@@ -33,59 +34,31 @@ providers:
     access_key_id: "SCWxxxxxxxxxxxxxxxxx"
     secret_key: "${SCALEWAY_SECRET_KEY}"
 
-roles:
-  title:
+# price_per_1m_input/output (USD je 1 Million Tokens) sind optional,
+# aktivieren aber die Kostenschaetzung im Log und in step_results (siehe
+# README "Kosten pro KI-Aufruf"). Fuer ollama-Modelle nicht noetig - lokale
+# Anfragen werden immer als $0 gezaehlt.
+#
+# Gibt es dasselbe Modell bei zwei Providern, bekommt einer der Eintraege
+# einen eigenen Schluessel und den echten Modellnamen per "model:", z.B.
+#   mistral-small-lokal:
+#     provider: ollama_lokal
+#     model: "mistral-small3.2:24b"
+models:
+  "qwen3:4b-instruct":
     provider: ollama_lokal
-    model: "qwen3:4b-instruct"
 
-  # Klassifizierung (ein Label aus einer kurzen Liste waehlen) braucht
-  # kein grosses/teures Modell - mistral-small ist auf Scaleway aktuell
-  # das guenstigste Modell mit guter Mehrsprachigkeit.
-  #
-  # price_per_1m_input/output (USD je 1 Million Tokens) sind optional,
-  # aktivieren aber die Kostenschaetzung im Log und in step_results
-  # (siehe README "Kosten pro KI-Aufruf"). Fuer ollama-Rollen nicht
-  # noetig - lokale Anfragen werden immer als $0 gezaehlt.
-  document_type:
+  mistral-small-3.2-24b-instruct-2506:
     provider: scaleway
-    model: "mistral-small-3.2-24b-instruct-2506"
     price_per_1m_input: 0.15
     price_per_1m_output: 0.35
 
-  # Mehrfachauswahl (z.B. Tags) ist auch "nur" Klassifizierung - dasselbe
-  # guenstige Modell reicht.
-  tags:
+  qwen3.8-27b:
     provider: scaleway
-    model: "mistral-small-3.2-24b-instruct-2506"
-    price_per_1m_input: 0.15
-    price_per_1m_output: 0.35
+    price_per_1m_input: 0.60
+    price_per_1m_output: 3.20
 
-  # Beispiel: eine weitere Rolle nutzt denselben Scaleway-Zugang mit einem
-  # staerkeren Modell fuer komplexere Aufgaben, ohne den API-Key erneut
-  # eintragen zu muessen.
-  precise:
+  llama-3.3-70b-instruct:
     provider: scaleway
-    model: "llama-3.3-70b-instruct"
-    price_per_1m_input: 0.90
-    price_per_1m_output: 0.90
-
-  # Korrespondenten-Erkennung, Stufe 1 (siehe config/steps.yaml:
-  # correspondent, TODO_paperless_korrespondenten_pipeline.md): reine
-  # Extraktion eines wahrscheinlichen Namens aus dem Text - wie
-  # document_type eine einfache Klassifizierungsaufgabe, daher dasselbe
-  # guenstige Modell.
-  correspondent_step1:
-    provider: scaleway
-    model: "mistral-small-3.2-24b-instruct-2506"
-    price_per_1m_input: 0.15
-    price_per_1m_output: 0.35
-
-  # Korrespondenten-Erkennung, Stufe 2: wird NUR bei mehrdeutigen
-  # Fuzzy-Treffern aufgerufen (selten), muss dann aber tatsaechlich
-  # zwischen mehreren aehnlich klingenden Firmen/Behoerden unterscheiden -
-  # daher das staerkere Modell wie "precise".
-  correspondent_step2:
-    provider: scaleway
-    model: "llama-3.3-70b-instruct"
     price_per_1m_input: 0.90
     price_per_1m_output: 0.90

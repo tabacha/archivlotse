@@ -21,6 +21,7 @@ from .db import (
     save_step_result,
 )
 from .docling import DoclingClient
+from .errors import log_failure
 from .ocr_quality import ocr_quality_score
 from .paperless import PaperlessClient
 from .prompts import load_prompt_source, render_prompt
@@ -277,13 +278,15 @@ def process_pipeline(
     document_id: int,
     dry_run: bool = False,
     force: bool = False,
+    step_names: list[str] | None = None,
     paperless_config_path: str = "config/paperless.yaml",
     ai_config_path: str = "config/ai.yaml",
     steps_config_path: str = "config/steps.yaml",
     db_path: str = "data/archivlotse.db",
 ) -> dict[str, str | None]:
     """Run every step listed under `pipeline:` in config/steps.yaml, in
-    order, for one document.
+    order, for one document - or, if step_names is given (e.g. from a
+    batch job in config/batch.yaml), just those steps, in that order.
 
     Each step re-fetches the document fresh from Paperless, so a later
     step sees an earlier step's write (e.g. "title" sees the document
@@ -303,11 +306,22 @@ def process_pipeline(
     every AI/Docling call and every candidate-list fetch happens again,
     even for an unchanged document.
     """
-    order = load_pipeline_order(steps_config_path)
+    order = step_names if step_names is not None else load_pipeline_order(steps_config_path)
     results: dict[str, str | None] = {}
+    failed_steps: list[str] = []
     for step_name in order:
-        logger.info("Dokument %s: starte Pipeline-Schritt %r", document_id, step_name)
         try:
+            if failed_steps and load_step_config(step_name, steps_config_path).requires_previous_success:
+                logger.warning(
+                    "Dokument %s, Schritt %r: übersprungen, da frühere Schritte fehlgeschlagen "
+                    "sind (%s)",
+                    document_id,
+                    step_name,
+                    ", ".join(failed_steps),
+                )
+                results[step_name] = None
+                continue
+            logger.info("Dokument %s: starte Pipeline-Schritt %r", document_id, step_name)
             results[step_name] = process_step(
                 step_name=step_name,
                 document_id=document_id,
@@ -318,134 +332,33 @@ def process_pipeline(
                 steps_config_path=steps_config_path,
                 db_path=db_path,
             )
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
+        except Exception as exc:
+            if _is_missing_document_error(exc, document_id):
                 logger.error(
                     "Dokument %s existiert nicht in Paperless (404) - Pipeline abgebrochen "
                     "(restliche Schritte würden identisch fehlschlagen)",
                     document_id,
                 )
                 break
-            logger.exception(
-                "Dokument %s, Schritt %r: fehlgeschlagen, überspringe und fahre mit dem "
-                "nächsten Schritt fort",
-                document_id,
-                step_name,
+            log_failure(
+                logger,
+                f"Dokument {document_id}, Schritt {step_name!r} fehlgeschlagen (weiter mit "
+                "nächstem Schritt)",
+                exc,
             )
             results[step_name] = None
-        except Exception:
-            logger.exception(
-                "Dokument %s, Schritt %r: fehlgeschlagen, überspringe und fahre mit dem "
-                "nächsten Schritt fort",
-                document_id,
-                step_name,
-            )
-            results[step_name] = None
+            failed_steps.append(step_name)
     return results
 
 
-def process_batch_by_tag(
-    tag_name: str,
-    step_name: str | None = None,
-    ai_role: str | None = None,
-    dry_run: bool = False,
-    force: bool = False,
-    limit: int | None = None,
-    paperless_config_path: str = "config/paperless.yaml",
-    ai_config_path: str = "config/ai.yaml",
-    steps_config_path: str = "config/steps.yaml",
-    db_path: str = "data/archivlotse.db",
-) -> dict[int, object]:
-    """Run the whole pipeline (or, if step_name is given, just that one
-    step) for every Paperless document tagged `tag_name`, one after
-    another, smallest document id first.
-
-    Immediately before processing each document, its tags are re-checked
-    fresh against Paperless - the document list was fetched once up
-    front, but a long batch can take a while, and the tag may have been
-    removed (e.g. by someone else, or a previous document's processing)
-    in the meantime. A document that no longer has the tag is skipped,
-    not processed anyway.
-
-    A document that raises is logged and skipped - one bad document
-    (unexpected content, a transient network error, ...) must not stop
-    the rest of the batch. This does NOT add/remove the tag itself on
-    any document; tagging something "done" is a separate decision the
-    caller makes, not something this function assumes.
-    """
-    paperless_config = load_paperless_config(paperless_config_path)
-    conn = init_db(db_path)
-
-    with PaperlessClient(paperless_config) as paperless:
-        tags = _get_candidates(conn, paperless, "tags", force)
-        tag_id = next(
-            (tag["id"] for tag in tags if tag["name"].strip().casefold() == tag_name.strip().casefold()),
-            None,
-        )
-        if tag_id is None:
-            available = ", ".join(sorted(tag["name"] for tag in tags)) or "(keine)"
-            raise ValueError(f"Tag {tag_name!r} existiert nicht in Paperless. Vorhanden: {available}")
-        document_ids = sorted(document["id"] for document in paperless.list_documents_by_tag_id(tag_id))
-
-        if limit is not None:
-            document_ids = document_ids[:limit]
-
-        logger.info("Batch (Tag %r): %d Dokument(e) gefunden", tag_name, len(document_ids))
-
-        results: dict[int, object] = {}
-        for index, document_id in enumerate(document_ids, start=1):
-            logger.info(
-                "Batch (Tag %r): Dokument %s (%d/%d)", tag_name, document_id, index, len(document_ids)
-            )
-            current_document = paperless.get_document(document_id)
-            if tag_id not in (current_document.get("tags") or []):
-                logger.info(
-                    "Batch (Tag %r): Dokument %s hat den Tag inzwischen nicht mehr - übersprungen",
-                    tag_name,
-                    document_id,
-                )
-                results[document_id] = None
-                continue
-
-            try:
-                if step_name is not None:
-                    results[document_id] = process_step(
-                        step_name=step_name,
-                        document_id=document_id,
-                        dry_run=dry_run,
-                        force=force,
-                        ai_role=ai_role,
-                        paperless_config_path=paperless_config_path,
-                        ai_config_path=ai_config_path,
-                        steps_config_path=steps_config_path,
-                        db_path=db_path,
-                    )
-                else:
-                    results[document_id] = process_pipeline(
-                        document_id=document_id,
-                        dry_run=dry_run,
-                        force=force,
-                        paperless_config_path=paperless_config_path,
-                        ai_config_path=ai_config_path,
-                        steps_config_path=steps_config_path,
-                        db_path=db_path,
-                    )
-            except Exception:
-                logger.exception(
-                    "Batch (Tag %r): Dokument %s fehlgeschlagen, überspringe und fahre mit dem "
-                    "nächsten Dokument fort",
-                    tag_name,
-                    document_id,
-                )
-                results[document_id] = None
-
-        logger.info(
-            "Batch (Tag %r) abgeschlossen: %d von %d Dokument(en) verarbeitet",
-            tag_name,
-            len(results),
-            len(document_ids),
-        )
-        return results
+def _is_missing_document_error(exc: Exception, document_id: int) -> bool:
+    """True only for a 404 on the Paperless document itself - not for a
+    404 from another service (e.g. Ollama's "model not found")."""
+    return (
+        isinstance(exc, httpx.HTTPStatusError)
+        and exc.response.status_code == 404
+        and exc.request.url.path.rstrip("/").endswith(f"/api/documents/{document_id}")
+    )
 
 
 def process_step(
@@ -453,7 +366,7 @@ def process_step(
     document_id: int,
     dry_run: bool = False,
     force: bool = False,
-    ai_role: str | None = None,
+    model: str | None = None,
     paperless_config_path: str = "config/paperless.yaml",
     ai_config_path: str = "config/ai.yaml",
     steps_config_path: str = "config/steps.yaml",
@@ -480,16 +393,16 @@ def process_step(
       are dropped, not fatal to the step), and the final value is
       `(current | add) - delete` - existing values are kept unless the AI
       explicitly proposes removing them.
-    - OCR quality check (step has `quality_check` set): no AI role/prompt
+    - OCR quality check (step has `quality_check` set): no AI model/prompt
       at all - estimate the existing text's OCR quality, and only if it's
       below quality_threshold, re-OCR the original file via Docling Serve
       and (if the result passes a basic sanity check) write it back.
     - Correspondent step (step has `prompt_step2` set): two-stage
-      recognition - the primary prompt/ai_role extracts a probable name
+      recognition - the primary prompt/model extracts a probable name
       from the text, RapidFuzz scores it against candidates_endpoint's
       list deterministically, and only an ambiguous fuzzy result (see
       fuzzy_*_min_* thresholds in StepConfig) triggers a second AI call
-      (prompt_step2/ai_role_step2) with the closest few candidates to
+      (prompt_step2/model_step2) with the closest few candidates to
       disambiguate. See TODO_paperless_korrespondenten_pipeline.md.
 
     All shapes except the OCR check also support a `condition`: the step
@@ -515,10 +428,12 @@ def process_step(
     with PaperlessClient(paperless_config) as paperless:
         if step_config.quality_check:
             return _process_ocr_step(step_config, paperless, conn, document_id, dry_run, force)
+        if step_config.add_tags:
+            return _process_add_tags_step(step_config, paperless, conn, document_id, dry_run, force)
 
-        ai_config = load_ai_config(ai_role or step_config.ai_role, ai_config_path)
+        ai_config = load_ai_config(model or step_config.model, ai_config_path)
         if step_config.prompt_step2:
-            ai_config_step2 = load_ai_config(step_config.ai_role_step2, ai_config_path)
+            ai_config_step2 = load_ai_config(step_config.model_step2, ai_config_path)
             return _process_correspondent_step(
                 step_config, ai_config, ai_config_step2, paperless, conn, document_id, dry_run, force
             )
@@ -809,14 +724,14 @@ def _process_correspondent_step(
     """Two-stage correspondent recognition, see
     TODO_paperless_korrespondenten_pipeline.md for the full design:
 
-    1. step1 (step_config.prompt/ai_role) extracts a probable
+    1. step1 (step_config.prompt/model) extracts a probable
        correspondent name from the text, or NO_CORRESPONDENT_SENTINEL.
     2. RapidFuzz scores that name against every existing Paperless
        correspondent (candidates_endpoint), deterministically, no AI
        involved.
     3. A confident, clearly-leading fuzzy match is assigned directly.
        An ambiguous result (several similarly-plausible candidates)
-       triggers step2 (prompt_step2/ai_role_step2) with just the closest
+       triggers step2 (prompt_step2/model_step2) with just the closest
        few candidates to disambiguate using the full text. A weak match
        is left alone.
 
@@ -1167,7 +1082,7 @@ def _process_ocr_step(
     dry_run: bool,
     force: bool = False,
 ) -> str | None:
-    """OCR quality check/improve step. No AI role or prompt is used.
+    """OCR quality check/improve step. No AI model or prompt is used.
 
     The existing text's quality is estimated first (cheap, no network
     call beyond fetching the document); only if it's below
@@ -1293,6 +1208,54 @@ def _process_ocr_step(
         new_summary,
         dry_run,
         write_value=new_text,
+    )
+
+
+def _process_add_tags_step(
+    step_config: StepConfig,
+    paperless: PaperlessClient,
+    conn: sqlite3.Connection,
+    document_id: int,
+    dry_run: bool,
+    force: bool = False,
+) -> str | None:
+    """Add the fixed, already existing tags named in step_config.add_tags
+    (e.g. a "done" marker) to the document - no AI, no fingerprint/cache
+    (it's a cheap, deterministic set union; adding an already-present tag
+    is a no-op). Existing tags are never removed. A named tag missing
+    from Paperless is an error, never auto-created; the (cached) tag list
+    is re-fetched once before giving up, so a tag created just now in
+    Paperless is found without waiting for the cache TTL."""
+    tags = _get_candidates(conn, paperless, "tags", force)
+    id_by_name = {tag["name"].strip().casefold(): tag["id"] for tag in tags}
+    missing = [name for name in step_config.add_tags if name.strip().casefold() not in id_by_name]
+    if missing and not force:
+        tags = _get_candidates(conn, paperless, "tags", force=True)
+        id_by_name = {tag["name"].strip().casefold(): tag["id"] for tag in tags}
+        missing = [name for name in step_config.add_tags if name.strip().casefold() not in id_by_name]
+    if missing:
+        raise ValueError(
+            f"Schritt {step_config.name!r}: Tag(s) {missing} existieren nicht in Paperless - "
+            "bitte dort anlegen (ArchivLotse legt keine Tags selbst an)"
+        )
+    name_by_id = {tag["id"]: tag["name"] for tag in tags}
+
+    document = paperless.get_document(document_id)
+    current_ids = sorted(document.get(step_config.target_field) or [])
+    new_ids = sorted(
+        set(current_ids) | {id_by_name[name.strip().casefold()] for name in step_config.add_tags}
+    )
+    current_names = ", ".join(name_by_id.get(i, str(i)) for i in current_ids)
+    new_names = ", ".join(name_by_id.get(i, str(i)) for i in new_ids)
+    return _apply_value(
+        step_config,
+        paperless,
+        conn,
+        document_id,
+        current_names or "(keine)",
+        new_names or "(keine)",
+        dry_run,
+        write_value=new_ids,
     )
 
 

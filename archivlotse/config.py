@@ -44,47 +44,59 @@ def load_paperless_config(path: str | Path = "config/paperless.yaml") -> Paperle
     return PaperlessConfig(url=data["url"].rstrip("/"), token=data["token"])
 
 
-def load_ai_roles(path: str | Path = "config/ai.yaml") -> dict[str, AIConfig]:
-    """Load all model roles from config/ai.yaml.
+def load_ai_models(path: str | Path = "config/ai.yaml") -> dict[str, AIConfig]:
+    """Load all models from config/ai.yaml.
 
     The file defines reusable "providers" (connection details, incl. any
-    credentials) once, and "roles" (logical tasks like "title") that each
-    pick a provider + model. This way cloud credentials are only ever
-    written once, even if several roles use them with different models.
+    credentials) once, and "models" keyed by model name, each pointing at
+    the provider that serves it (plus optional pricing). Steps in
+    config/steps.yaml reference these model names directly. This way cloud
+    credentials are only ever written once, even if several models use them.
+
+    The key is sent to the provider as the model name, unless the entry
+    sets an explicit `model:` - useful when the same model is available
+    from two providers and needs two distinct keys.
     """
     data = load_yaml(path)
     providers = data.get("providers", {})
-    roles_data = data.get("roles", {})
+    models_data = data.get("models", {})
 
-    roles: dict[str, AIConfig] = {}
-    for role_name, role in roles_data.items():
-        provider_name = role["provider"]
+    if "roles" in data and not models_data:
+        raise ValueError(
+            f"{path} benutzt noch das alte 'roles:'-Format - bitte auf 'models:' umstellen "
+            "(Modellname -> provider, siehe config/ai.example.yaml)"
+        )
+
+    models: dict[str, AIConfig] = {}
+    for model_name, entry in models_data.items():
+        entry = entry or {}
+        provider_name = entry.get("provider")
         try:
             provider = providers[provider_name]
         except KeyError as exc:
             raise ValueError(
-                f"Rolle {role_name!r} in {path} verweist auf unbekannten "
+                f"Modell {model_name!r} in {path} verweist auf unbekannten "
                 f"Provider {provider_name!r}"
             ) from exc
-        roles[role_name] = AIConfig(
+        models[model_name] = AIConfig(
             provider=provider["type"],
             base_url=provider["base_url"].rstrip("/"),
-            model=role["model"],
+            model=entry.get("model", model_name),
             access_key_id=provider.get("access_key_id"),
             secret_key=provider.get("secret_key"),
-            price_per_1m_input=role.get("price_per_1m_input"),
-            price_per_1m_output=role.get("price_per_1m_output"),
+            price_per_1m_input=entry.get("price_per_1m_input"),
+            price_per_1m_output=entry.get("price_per_1m_output"),
             timeout=provider.get("timeout", 120.0),
         )
-    return roles
+    return models
 
 
-def load_ai_config(role: str, path: str | Path = "config/ai.yaml") -> AIConfig:
-    roles = load_ai_roles(path)
+def load_ai_config(model: str, path: str | Path = "config/ai.yaml") -> AIConfig:
+    models = load_ai_models(path)
     try:
-        return roles[role]
+        return models[model]
     except KeyError as exc:
-        available = ", ".join(sorted(roles)) or "(keine)"
+        available = ", ".join(sorted(models)) or "(keine)"
         raise ValueError(
-            f"Unbekannte Modellrolle {role!r} in {path}. Verfügbare Rollen: {available}"
+            f"Unbekanntes Modell {model!r} in {path} (models:). Verfügbare Modelle: {available}"
         ) from exc

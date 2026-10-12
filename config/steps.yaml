@@ -1,6 +1,6 @@
 # Fachliche Pipeline-Konfiguration: pro Verarbeitungsschritt, welches
-# Paperless-Feld gelesen wird, welcher Jinja2-Prompt und welche Modellrolle
-# (aus config/ai.yaml) benutzt wird, welches Feld mit dem Ergebnis
+# Paperless-Feld gelesen wird, welcher Jinja2-Prompt und welches Modell
+# (Name aus config/ai.yaml: models:) benutzt wird, welches Feld mit dem Ergebnis
 # beschrieben wird, sowie einfache Vor-/Nachbearbeitung rund um den
 # KI-Aufruf. Der Python-Code kennt "title" o.ae. nicht selbst - das steht
 # ausschliesslich hier.
@@ -21,11 +21,12 @@ pipeline:
   - correspondent
   - tags
   - title
+  - mark_done
 
 steps:
   # Vorhandenen OCR-Text auf Qualitaet pruefen und bei Bedarf per Docling
   # Serve neu erkennen (force_ocr). Kein KI-Aufruf noetig
-  # (quality_check: heuristic), daher auch kein prompt/ai_role.
+  # (quality_check: heuristic), daher auch kein prompt/model.
   # quality_check: ai_judge ist als Alternative vorgesehen, aber noch
   # nicht implementiert.
   ocr_check:
@@ -50,7 +51,10 @@ steps:
     target_field: document_type
 
     prompt: document_type.j2
-    ai_role: document_type
+    # Klassifizierung (ein Label aus einer kurzen Liste waehlen) braucht
+    # kein grosses/teures Modell - mistral-small ist auf Scaleway aktuell
+    # das guenstigste Modell mit guter Mehrsprachigkeit.
+    model: "mistral-small-3.2-24b-instruct-2506"
 
     # Die KI muss einen der tatsaechlich in Paperless vorhandenen
     # Dokumenttypen waehlen (per /api/document_types/ geladen) statt
@@ -70,7 +74,7 @@ steps:
     target_field: tags
 
     prompt: tags.j2
-    ai_role: tags
+    model: "qwen3.8-27b"
 
     # Tags sind eine Mehrfachauswahl (ein Dokument kann mehrere haben).
     # Die KI antwortet mit "Hinzufuegen: ..."/"Loeschen: ..." (siehe
@@ -84,6 +88,7 @@ steps:
     # vorschlaegt (Schutz auf Config-Ebene, nicht nur per Prompt-Text).
     protected_candidates:
       - TODO
+      - archivlotse-done
 
     preprocessing:
       max_input_chars: 8000
@@ -104,9 +109,10 @@ steps:
     target_field: correspondent
 
     # Stufe 1: wahrscheinlichen Namen aus dem Text extrahieren (freier
-    # Text, kein Kandidatenabgleich durch die KI selbst).
+    # Text, kein Kandidatenabgleich durch die KI selbst) - einfache
+    # Extraktion, daher dasselbe guenstige Modell wie document_type.
     prompt: correspondent-step1.j2
-    ai_role: correspondent_step1
+    model: "mistral-small-3.2-24b-instruct-2506"
 
     # RapidFuzz vergleicht den extrahierten Namen deterministisch mit
     # allen vorhandenen Korrespondenten (/api/correspondents/).
@@ -114,8 +120,11 @@ steps:
 
     # Stufe 2: nur bei mehrdeutigem Fuzzy-Ergebnis aufgerufen, mit den
     # paar aehnlichsten Kandidaten zur Disambiguierung.
+    # Selten aufgerufen, muss dann aber tatsaechlich zwischen mehreren
+    # aehnlich klingenden Firmen/Behoerden unterscheiden - daher ein
+    # staerkeres Modell.
     prompt_step2: correspondent-step2.j2
-    ai_role_step2: correspondent_step2
+    model_step2: "llama-3.3-70b-instruct"
 
     # Beispiel-Startwerte (siehe TODO-Datei) - mit echten Dokumenten
     # kalibrieren, bevor automatisch zugeordnet wird:
@@ -138,7 +147,7 @@ steps:
     target_field: title
 
     prompt: title.j2
-    ai_role: title
+    model: "qwen3:4b-instruct"
 
     preprocessing:
       # Laengerer Eingabetext wird vor dem Rendern des Prompts auf so
@@ -151,3 +160,16 @@ steps:
       # Zur Sicherheit auf maximal so viele Zeichen kuerzen, falls sich
       # das Modell nicht an die Laengenvorgabe im Prompt haelt.
       max_length: 120
+
+  # Dokument als von ArchivLotse bearbeitet markieren (kein KI-Aufruf).
+  # Der Tag muss in Paperless bereits existieren - ArchivLotse legt keine
+  # Tags selbst an. Steht als letzter Schritt in pipeline: und wird dort
+  # nur ausgefuehrt, wenn kein frueherer Schritt dieses Laufs
+  # fehlgeschlagen ist (requires_previous_success). Der Batch-Job "todo"
+  # (config/batch.yaml) schliesst so markierte Dokumente beim naechsten
+  # Lauf aus.
+  mark_done:
+    target_field: tags
+    add_tags:
+      - archivlotse-done
+    requires_previous_success: true
