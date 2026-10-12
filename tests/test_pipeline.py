@@ -885,10 +885,9 @@ FAKE_CORRESPONDENT_STEP_CONFIG = StepConfig(
 
 # Deliberately includes two similarly-named candidates ("Mueller GmbH" /
 # "Mueller Handel GmbH") so a query like "Müller GmbH" is a genuinely
-# ambiguous fuzzy match (gap < fuzzy_assign_min_gap) - see
-# TODO_paperless_korrespondenten_pipeline.md's own "Allianz Versicherung
-# vs. Lebensversicherung" example for why this can't be resolved by score
-# alone.
+# ambiguous fuzzy match (gap < fuzzy_assign_min_gap) - like "Allianz
+# Versicherung" vs. "Allianz Lebensversicherung", this can't be resolved by
+# score alone.
 CORRESPONDENTS = [
     {"id": 1, "name": "Mueller GmbH"},
     {"id": 2, "name": "Mueller Handel GmbH"},

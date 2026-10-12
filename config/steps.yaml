@@ -97,10 +97,11 @@ steps:
       strip_quotes: true
       max_length: 500
 
-  # Zweistufige Korrespondenten-Erkennung, siehe
-  # TODO_paperless_korrespondeten_pipeline.md fuer die vollstaendige
-  # Herleitung der Schwellenwerte (fuzzy_*_min_* unten, bewusst
-  # Beispiel-Startwerte - ggf. an mehr echten Dokumenten nachjustieren).
+  # Zweistufige Korrespondenten-Erkennung: Stufe 1 (KI) extrahiert einen
+  # Namen, RapidFuzz vergleicht ihn deterministisch mit allen vorhandenen
+  # Korrespondenten, Stufe 2 (KI) wird nur bei mehrdeutigem Ergebnis
+  # gefragt. Neue Korrespondenten werden nie automatisch angelegt - ein
+  # Name ohne passenden Kandidaten wird nur als Vorschlag geloggt.
   # Bekannte Grenze: bei Kontoauszuegen (kein klarer Absender/Empfaenger-
   # Briefkopf) liefert Schritt 1 oft KEINEN-GEFUNDEN statt der
   # ausstellenden Bank - noch nicht behoben.
@@ -126,8 +127,19 @@ steps:
     prompt_step2: correspondent-step2.j2
     model_step2: "llama-3.3-70b-instruct"
 
-    # Beispiel-Startwerte (siehe TODO-Datei) - mit echten Dokumenten
-    # kalibrieren, bevor automatisch zugeordnet wird:
+    # Entscheidung nach dem Fuzzy-Abgleich (gap = bester - zweitbester Score):
+    #   Score >= fuzzy_assign_min_score UND (gap >= fuzzy_assign_min_gap
+    #   oder nur ein Kandidat) -> vorhandenen Korrespondenten direkt zuordnen
+    #   sonst Score >= fuzzy_review_min_score -> Stufe 2 mit den (hoechstens
+    #     fuzzy_candidate_limit) Kandidaten ab dieser Schwelle - auch bei
+    #     mittelmaessigem Score mit grossem Abstand, der wird NIE allein
+    #     wegen des Abstands direkt zugeordnet
+    #   sonst (Score zu niedrig) -> nichts zuordnen
+    # Bewusst Beispiel-Startwerte, noch nicht an einer groesseren
+    # Dokument-Stichprobe kalibriert. Ein hoher Score allein beweist keine
+    # Identitaet (z.B. "Allianz Versicherung" vs. "Allianz
+    # Lebensversicherung" sind verschiedene Rechtstraeger) - im Zweifel
+    # lieber nicht zuordnen als falsch.
     fuzzy_assign_min_score: 95.0
     fuzzy_assign_min_gap: 8.0
     fuzzy_review_min_score: 80.0

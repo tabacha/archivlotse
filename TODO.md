@@ -1,8 +1,8 @@
 # TODO
 
 Offene Punkte aus der Zielarchitektur (siehe `CLAUDE.md`), die noch nicht
-umgesetzt sind. Kein Design-Dokument wie `TODO_paperless_korrespondenten_pipeline.md`,
-sondern eine Sammelstelle, damit nichts verloren geht.
+umgesetzt sind. Kein Design-Dokument, sondern eine Sammelstelle, damit
+nichts verloren geht.
 
 ## Custom Fields (z. B. Kontonummer)
 

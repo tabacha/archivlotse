@@ -41,7 +41,8 @@ class StepConfig:
     # vorhandenen Kandidaten (candidates_endpoint); nur bei mehrdeutigem
     # Ergebnis wird eine zweite KI-Abfrage (prompt_step2/model_step2) mit
     # den paar aehnlichsten Kandidaten gestellt. Schwellenwerte sind
-    # bewusst Config, nicht Code - siehe TODO_paperless_korrespondenten_pipeline.md.
+    # bewusst Config, nicht Code - siehe Kommentar am correspondent-Schritt
+    # in config/steps.yaml.
     prompt_step2: str | None = None
     model_step2: str | None = None
     # Score (0-100) UND Abstand zum zweitbesten Treffer, ab dem ein
@@ -108,8 +109,8 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
     RapidFuzz compares it deterministically against candidates_endpoint's
     list, and only an ambiguous fuzzy result (see fuzzy_*_min_* thresholds)
     triggers a second AI call (prompt_step2/model_step2) with the
-    fuzzy_candidate_limit closest candidates to disambiguate. See
-    TODO_paperless_korrespondenten_pipeline.md for the full decision logic.
+    fuzzy_candidate_limit closest candidates to disambiguate. The decision
+    rules are documented next to the thresholds in config/steps.yaml.
     """
     data = load_yaml(path)
     steps = data.get("steps", {})

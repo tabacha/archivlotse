@@ -41,8 +41,7 @@ UNKNOWN_SENTINEL = "UNBEKANNT"
 NONE_SENTINEL = "KEINE"
 
 # Answer for a correspondent step (step1 or step2, see
-# config/prompts/correspondent-step*.j2 and
-# TODO_paperless_korrespondenten_pipeline.md) when no correspondent can be
+# config/prompts/correspondent-step*.j2) when no correspondent can be
 # confidently determined from the text at all - distinct from "a name was
 # extracted but doesn't match an existing Paperless correspondent", which
 # is a candidate for a NEW correspondent (never auto-created, see
@@ -232,8 +231,7 @@ def _normalize_correspondent_name(name: str) -> str:
     """Minimal normalization before fuzzy matching: collapse whitespace
     and casefold only. Deliberately does NOT strip legal forms (GmbH,
     AG, ...), location suffixes, or terms like "Lebensversicherung" vs.
-    "Versicherung" - per TODO_paperless_korrespondenten_pipeline.md, these
-    can distinguish genuinely different legal entities and must survive
+    "Versicherung" - these can distinguish genuinely different legal entities and must survive
     into the fuzzy score, not be normalized away."""
     return " ".join(name.strip().split()).casefold()
 
@@ -403,7 +401,7 @@ def process_step(
       list deterministically, and only an ambiguous fuzzy result (see
       fuzzy_*_min_* thresholds in StepConfig) triggers a second AI call
       (prompt_step2/model_step2) with the closest few candidates to
-      disambiguate. See TODO_paperless_korrespondenten_pipeline.md.
+      disambiguate.
 
     All shapes except the OCR check also support a `condition`: the step
     is skipped entirely (no AI call) unless the document's current
@@ -721,8 +719,8 @@ def _process_correspondent_step(
     dry_run: bool,
     force: bool = False,
 ) -> str | None:
-    """Two-stage correspondent recognition, see
-    TODO_paperless_korrespondenten_pipeline.md for the full design:
+    """Two-stage correspondent recognition (thresholds and their
+    rationale: the `correspondent` step in config/steps.yaml):
 
     1. step1 (step_config.prompt/model) extracts a probable
        correspondent name from the text, or NO_CORRESPONDENT_SENTINEL.
