@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import hashlib
 import logging
 import re
@@ -47,6 +48,19 @@ NONE_SENTINEL = "KEINE"
 # is a candidate for a NEW correspondent (never auto-created, see
 # CLAUDE.md non-goals - just logged for manual review).
 NO_CORRESPONDENT_SENTINEL = "KEINEN-GEFUNDEN"
+
+# Answer for a document-date step (see config/prompts/create-date-*.j2)
+# when no reliable creation date is recognizable - nothing is written.
+NO_DATE_SENTINEL = "KEIN-DATUM-GEFUNDEN"
+
+# Date answers: "DD.MM.YYYY" (create-date-small.j2) or "DD.MM.YYYY|SCORE"
+# (create-date-part.j2). Matched against the WHOLE cleaned answer, so a
+# date buried in an explanation is rejected rather than guessed at.
+_DATE_ANSWER_RE = re.compile(r"(\d{2})\.(\d{2})\.(\d{4})(?:\s*\|\s*(\d{1,3}))?")
+
+# Earliest year accepted as a plausible document creation date - an older
+# one is almost certainly an OCR/AI error (or a birth date etc.).
+MIN_DOCUMENT_YEAR = 1900
 
 # Multi-choice prompts (e.g. config/prompts/tags.j2) answer in two labeled
 # lines, one for candidates to add and one for candidates to remove, so
@@ -395,6 +409,9 @@ def process_step(
       at all - estimate the existing text's OCR quality, and only if it's
       below quality_threshold, re-OCR the original file via Docling Serve
       and (if the result passes a basic sanity check) write it back.
+    - Document-date step (step has `date: {prompt_small: ...}` set): see
+      _process_date_step - one full-text AI call for short documents,
+      otherwise first/last part with a confidence score per answer.
     - Correspondent step (step has `prompt_step2` set): two-stage
       recognition - the primary prompt/model extracts a probable name
       from the text, RapidFuzz scores it against candidates_endpoint's
@@ -430,6 +447,8 @@ def process_step(
             return _process_add_tags_step(step_config, paperless, conn, document_id, dry_run, force)
 
         ai_config = load_ai_config(model or step_config.model, ai_config_path)
+        if step_config.date_prompt_small:
+            return _process_date_step(step_config, ai_config, paperless, conn, document_id, dry_run, force)
         if step_config.prompt_step2:
             ai_config_step2 = load_ai_config(step_config.model_step2, ai_config_path)
             return _process_correspondent_step(
@@ -1023,6 +1042,231 @@ def _process_correspondent_step(
         dry_run,
         write_value=matched_id,
     )
+
+
+def _parse_date_answer(answer: str, today: datetime.date) -> tuple[datetime.date, int | None] | None:
+    """Parse a document-date answer ("DD.MM.YYYY" or "DD.MM.YYYY|SCORE")
+    into (date, score). None for the NO_DATE_SENTINEL, anything not in
+    exactly that format, an invalid calendar date, a date before
+    MIN_DOCUMENT_YEAR or after `today`, or a score outside 1-100 - the AI
+    proposes, this decides whether it's usable at all."""
+    value = answer.strip()
+    if value.split("|", 1)[0].strip().casefold() == NO_DATE_SENTINEL.casefold():
+        return None
+    match = _DATE_ANSWER_RE.fullmatch(value)
+    if match is None:
+        return None
+    day, month, year, score = match.groups()
+    try:
+        date = datetime.date(int(year), int(month), int(day))
+    except ValueError:
+        return None
+    if date.year < MIN_DOCUMENT_YEAR or date > today:
+        return None
+    if score is None:
+        return date, None
+    score_value = int(score)
+    if not 1 <= score_value <= 100:
+        return None
+    return date, score_value
+
+
+def _process_date_step(
+    step_config: StepConfig,
+    ai_config: AIConfig,
+    paperless: PaperlessClient,
+    conn: sqlite3.Connection,
+    document_id: int,
+    dry_run: bool,
+    force: bool = False,
+) -> str | None:
+    """Determine the document's creation date (e.g. Paperless `created`):
+
+    1. Text <= date_small_max_chars: analyze it once in full with
+       date_prompt_small (answer: a date only, no score) - a valid date is
+       applied directly.
+    2. Otherwise send the first date_part_chars to `prompt` (answer:
+       "DD.MM.YYYY|SCORE"). A valid date with score >= date_min_score is
+       applied without looking further.
+    3. Otherwise also send the last date_part_chars, and take the valid
+       date with the highest score (the first part wins a tie).
+    4. If that best score is still below date_min_score, it's only
+       written when target_field is empty - an existing date is never
+       overwritten by an uncertain guess.
+
+    An answer that isn't a valid, plausible date (see _parse_date_answer)
+    counts as "no date found" for that part. Each AI call is cached on
+    its own (cache keys "<step>:small"/"<step>:first"/"<step>:last").
+    """
+    document = paperless.get_document(document_id)
+
+    document_type_name = _resolve_document_type_name(document, paperless, conn, force)
+    correspondent_name = _resolve_correspondent_name(document, paperless, conn, force)
+    if not _condition_met(step_config, document, document_type_name):
+        logger.info(
+            "Dokument %s, Schritt %r: Bedingung %r nicht erfüllt, Schritt übersprungen",
+            document_id,
+            step_config.name,
+            step_config.condition,
+        )
+        return None
+
+    input_text = str(document.get(step_config.source_field) or "").strip()
+    # Paperless returns `created` as "YYYY-MM-DD" (newer) or a full ISO
+    # datetime (older versions) - only the date part is compared/written.
+    old_value = str(document.get(step_config.target_field) or "")[:10] or None
+
+    if not input_text:
+        logger.warning(
+            "Dokument %s: Feld %r ist leer, Schritt %r übersprungen",
+            document_id,
+            step_config.source_field,
+            step_config.name,
+        )
+        return None
+
+    postprocessing_signature = (
+        f"strip_quotes={step_config.strip_quotes};"
+        f"max_output_length={step_config.max_output_length}"
+    )
+    today = datetime.date.today()
+
+    def _ask(part: str, prompt_name: str, text: str) -> tuple[datetime.date, int | None] | None:
+        cache_key = f"{step_config.name}:{part}"
+        prompt_source = load_prompt_source(prompt_name)
+        prompt_version = hashlib.sha256(prompt_source.encode("utf-8")).hexdigest()
+        fingerprint = _fingerprint(
+            text,
+            prompt_version,
+            ai_config.provider,
+            ai_config.model,
+            postprocessing_signature,
+            document_type_name or "",
+            correspondent_name or "",
+        )
+        cached = None if force else get_cached_step_result(conn, cache_key, document_id, fingerprint)
+        if cached is not None:
+            answer = cached["output_value"]
+            logger.info(
+                "Dokument %s, Schritt %r (%s): unveränderte Eingabe/Prompt/Modell, nutze "
+                "zwischengespeicherte Antwort %r",
+                document_id,
+                step_config.name,
+                part,
+                answer,
+            )
+        else:
+            prompt = render_prompt(
+                prompt_name,
+                input_text=text,
+                document_type_name=document_type_name,
+                correspondent_name=correspondent_name,
+            )
+            ai_client = build_ai_client(ai_config)
+            logger.info(
+                "Dokument %s, Schritt %r (%s): frage Erstellungsdatum bei %s/%s an (%d Zeichen)",
+                document_id,
+                step_config.name,
+                part,
+                ai_config.provider,
+                ai_config.model,
+                len(text),
+            )
+            logger.debug(
+                "Dokument %s, Schritt %r (%s): vollständiger Prompt:\n%s",
+                document_id,
+                step_config.name,
+                part,
+                prompt,
+            )
+            ai_result = ai_client.generate(prompt)
+            logger.debug(
+                "Dokument %s, Schritt %r (%s): rohe KI-Antwort: %r",
+                document_id,
+                step_config.name,
+                part,
+                ai_result.text,
+            )
+            cost = _log_usage(document_id, cache_key, ai_config, ai_result)
+            answer = _postprocess(ai_result.text, step_config)
+            save_step_result(
+                conn,
+                step_name=cache_key,
+                document_id=document_id,
+                fingerprint=fingerprint,
+                output_value=answer,
+                provider=ai_config.provider,
+                model=ai_config.model,
+                prompt_name=prompt_name,
+                prompt_version=prompt_version,
+                prompt_tokens=ai_result.prompt_tokens,
+                completion_tokens=ai_result.completion_tokens,
+                estimated_cost_usd=cost,
+            )
+            logger.info(
+                "Dokument %s, Schritt %r (%s): Antwort: %r", document_id, step_config.name, part, answer
+            )
+
+        parsed = _parse_date_answer(answer, today)
+        if parsed is None and answer.split("|", 1)[0].strip().casefold() != NO_DATE_SENTINEL.casefold():
+            logger.warning(
+                "Dokument %s, Schritt %r (%s): Antwort %r ist kein gültiges/plausibles Datum, "
+                "wird verworfen",
+                document_id,
+                step_config.name,
+                part,
+                answer,
+            )
+        return parsed
+
+    if len(input_text) <= step_config.date_small_max_chars:
+        result = _ask("small", step_config.date_prompt_small, input_text)
+        if result is None:
+            logger.info(
+                "Dokument %s, Schritt %r: kein Erstellungsdatum ermittelt, Feld %r bleibt unverändert",
+                document_id,
+                step_config.name,
+                step_config.target_field,
+            )
+            return None
+        best_date, best_score = result
+        confident = True
+    else:
+        part_chars = step_config.date_part_chars
+        results = []
+        first = _ask("first", step_config.prompt, input_text[:part_chars])
+        if first is not None:
+            results.append(first)
+        if first is None or first[1] < step_config.date_min_score:
+            last = _ask("last", step_config.prompt, input_text[-part_chars:])
+            if last is not None:
+                results.append(last)
+        if not results:
+            logger.info(
+                "Dokument %s, Schritt %r: kein Erstellungsdatum ermittelt, Feld %r bleibt unverändert",
+                document_id,
+                step_config.name,
+                step_config.target_field,
+            )
+            return None
+        best_date, best_score = max(results, key=lambda result: result[1])
+        confident = best_score >= step_config.date_min_score
+
+    new_value = best_date.isoformat()
+    if not confident and old_value:
+        logger.info(
+            "Dokument %s, Schritt %r: bestes Datum %s nur mit Score %s (< %s) - vorhandenes "
+            "Datum %s wird NICHT überschrieben",
+            document_id,
+            step_config.name,
+            new_value,
+            best_score,
+            step_config.date_min_score,
+            old_value,
+        )
+        return None
+
+    return _apply_value(step_config, paperless, conn, document_id, old_value, new_value, dry_run)
 
 
 def _apply_value(

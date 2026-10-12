@@ -18,19 +18,6 @@ Ursprünglicher Anlass: Kontonummer nur ermitteln, wenn
 dafür existiert in `steps.yaml` bereits und müsste nur wiederverwendet
 werden.
 
-## `document_date`-Step
-
-Noch kein Konzept umgesetzt. Laut `doc/PROJEKTIDEE.md` kann das
-maßgebliche Datum an beliebiger Stelle im Dokument stehen (z. B. neben
-einer Unterschrift oder in einem Nachtrag) - die erste Seite reicht nicht
-zwingend. Hängt deshalb teilweise am noch nicht gebauten
-Long-Document-Handling (dreistufige Strategie: kurze Dokumente komplett,
-mittlere per Abschnittsauswahl, lange per Passagensuche).
-
-Braucht außerdem eine Plausibilitätsprüfung (Datum nicht in der Zukunft,
-sinnvoller Bereich) nach demselben Prinzip wie die Validierung bei
-Auswahl-Schritten (KI schlägt vor, Code prüft).
-
 ## `quality_check: ai_judge`
 
 Aktuell nur als Platzhalter in `_process_ocr_step` vorgesehen - wirft

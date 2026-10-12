@@ -64,6 +64,17 @@ class StepConfig:
     # kein frueherer Schritt dieses Laufs fehlgeschlagen ist - z.B. damit
     # ein "erledigt"-Tag nicht nach einem gescheiterten Schritt gesetzt wird.
     requires_previous_success: bool = False
+    # Nur fuer Datums-Schritte (date_prompt_small gesetzt): Texte bis
+    # date_small_max_chars Zeichen werden einmal komplett mit
+    # date_prompt_small analysiert (Antwort: nur ein Datum); laengere
+    # zuerst die ersten, bei zu niedrigem Score zusaetzlich die letzten
+    # date_part_chars Zeichen mit `prompt` (Antwort: Datum|Score).
+    # Ein Datum mit Score >= date_min_score wird uebernommen, ein
+    # unsichereres nur, wenn target_field noch leer ist.
+    date_prompt_small: str | None = None
+    date_small_max_chars: int = 8000
+    date_part_chars: int = 6000
+    date_min_score: int = 85
 
 
 def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepConfig:
@@ -126,6 +137,7 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
     preprocessing = step.get("preprocessing", {}) or {}
     postprocessing = step.get("postprocessing", {}) or {}
     docling = step.get("docling", {}) or {}
+    date = step.get("date", {}) or {}
     quality_check = step.get("quality_check")
 
     config = StepConfig(
@@ -154,6 +166,10 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
         fuzzy_candidate_limit=step.get("fuzzy_candidate_limit", 5),
         add_tags=list(step.get("add_tags") or []),
         requires_previous_success=step.get("requires_previous_success", False),
+        date_prompt_small=date.get("prompt_small"),
+        date_small_max_chars=date.get("small_max_chars", 8000),
+        date_part_chars=date.get("part_chars", 6000),
+        date_min_score=date.get("min_score", 85),
     )
 
     if config.add_tags:

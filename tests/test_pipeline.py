@@ -1224,3 +1224,141 @@ def test_process_pipeline_logs_unreachable_service_as_one_line(monkeypatch, tmp_
     )
     assert unreachable.exc_info is None  # kein Traceback ohne --verbose
     assert bug.exc_info is not None  # unerwarteter Fehler behaelt den Traceback
+
+
+FAKE_DATE_STEP_CONFIG = StepConfig(
+    name="document_date",
+    prompt="create-date-part.j2",
+    model="m",
+    source_field="content",
+    target_field="created",
+    max_output_length=50,
+    date_prompt_small="create-date-small.j2",
+    date_small_max_chars=8000,
+    date_part_chars=6000,
+    date_min_score=85,
+)
+
+
+class SequenceAIClient:
+    """Returns the given answers in order, recording each prompt."""
+
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.prompts: list[str] = []
+
+    def generate(self, prompt: str) -> AIResult:
+        self.prompts.append(prompt)
+        return AIResult(text=self.answers.pop(0), prompt_tokens=1, completion_tokens=1)
+
+
+def _run_date_step(monkeypatch, tmp_path, content, created, answers, dry_run=False):
+    fake_paperless = FakePaperlessClient()
+    fake_paperless.document["content"] = content
+    fake_paperless.document["created"] = created
+    fake_ai = SequenceAIClient(answers)
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_paperless_config",
+        lambda path: PaperlessConfig(url="http://paperless.example", token="t"),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_ai_config",
+        lambda model, path: AIConfig(provider="ollama", base_url="http://ollama.example", model="m"),
+    )
+    monkeypatch.setattr(pipeline_module, "load_step_config", lambda name, path: FAKE_DATE_STEP_CONFIG)
+    monkeypatch.setattr(pipeline_module, "PaperlessClient", lambda config: fake_paperless)
+    monkeypatch.setattr(pipeline_module, "build_ai_client", lambda config: fake_ai)
+    result = pipeline_module.process_step(
+        step_name="document_date", document_id=1, dry_run=dry_run, db_path=str(tmp_path / "test.db")
+    )
+    return result, fake_paperless, fake_ai
+
+
+LONG_TEXT = "A" * 6000 + "B" * 3000 + "C" * 6000
+
+
+def test_date_step_small_document_single_call(monkeypatch, tmp_path):
+    result, paperless, ai = _run_date_step(
+        monkeypatch, tmp_path, "Rechnung vom 15.03.2025", "2025-04-01", ["15.03.2025"]
+    )
+    assert result == "2025-03-15"
+    assert paperless.update_calls == [("created", "2025-03-15")]
+    assert len(ai.prompts) == 1
+    assert "Rechnung vom 15.03.2025" in ai.prompts[0]
+
+
+def test_date_step_small_document_sentinel_writes_nothing(monkeypatch, tmp_path):
+    result, paperless, _ = _run_date_step(
+        monkeypatch, tmp_path, "kurz", "2025-04-01", ["KEIN-DATUM-GEFUNDEN"]
+    )
+    assert result is None
+    assert paperless.update_calls == []
+
+
+def test_date_step_long_document_confident_first_part_stops(monkeypatch, tmp_path):
+    result, paperless, ai = _run_date_step(
+        monkeypatch, tmp_path, LONG_TEXT, "2025-04-01T00:00:00+02:00", ["12.03.2025|90"]
+    )
+    assert result == "2025-03-12"
+    assert paperless.update_calls == [("created", "2025-03-12")]
+    assert len(ai.prompts) == 1
+    assert "A" * 6000 in ai.prompts[0] and "B" not in ai.prompts[0].split("OCR-TEXTABSCHNITT:")[1]
+
+
+def test_date_step_long_document_uses_higher_scored_last_part(monkeypatch, tmp_path):
+    result, paperless, ai = _run_date_step(
+        monkeypatch, tmp_path, LONG_TEXT, "2025-04-01", ["01.02.2025|60", "20.02.2025|92"]
+    )
+    assert result == "2025-02-20"
+    assert paperless.update_calls == [("created", "2025-02-20")]
+    assert len(ai.prompts) == 2
+    assert "C" * 6000 in ai.prompts[1]
+
+
+def test_date_step_low_score_does_not_overwrite_existing_date(monkeypatch, tmp_path):
+    result, paperless, _ = _run_date_step(
+        monkeypatch, tmp_path, LONG_TEXT, "2025-04-01", ["01.02.2025|60", "KEIN-DATUM-GEFUNDEN|1"]
+    )
+    assert result is None
+    assert paperless.update_calls == []
+
+
+def test_date_step_low_score_sets_missing_date(monkeypatch, tmp_path):
+    result, paperless, _ = _run_date_step(
+        monkeypatch, tmp_path, LONG_TEXT, None, ["01.02.2025|60", "03.02.2025|70"]
+    )
+    assert result == "2025-02-03"
+    assert paperless.update_calls == [("created", "2025-02-03")]
+
+
+def test_date_step_rejects_invalid_and_future_dates(monkeypatch, tmp_path):
+    result, paperless, _ = _run_date_step(
+        monkeypatch, tmp_path, LONG_TEXT, None, ["31.02.2025|99", "01.01.2999|99"]
+    )
+    assert result is None
+    assert paperless.update_calls == []
+
+
+def test_date_step_is_idempotent_per_part(monkeypatch, tmp_path):
+    _, paperless, _ = _run_date_step(
+        monkeypatch, tmp_path, LONG_TEXT, "2025-04-01", ["01.02.2025|60", "20.02.2025|92"]
+    )
+    # Zweiter Lauf: beide Teilergebnisse aus dem Cache, kein KI-Aufruf
+    # (eine leere Antwortliste wuerde bei einem Aufruf IndexError werfen).
+    result, _, ai = _run_date_step(monkeypatch, tmp_path, LONG_TEXT, "2025-02-20", [])
+    assert result == "2025-02-20"
+    assert ai.prompts == []
+
+
+def test_parse_date_answer():
+    today = pipeline_module.datetime.date(2026, 10, 12)
+    parse = pipeline_module._parse_date_answer
+    assert parse("15.03.2025", today) == (pipeline_module.datetime.date(2025, 3, 15), None)
+    assert parse("15.03.2025|87", today) == (pipeline_module.datetime.date(2025, 3, 15), 87)
+    assert parse("KEIN-DATUM-GEFUNDEN|1", today) is None
+    assert parse("Das Datum ist 15.03.2025", today) is None
+    assert parse("15.03.2025|0", today) is None
+    assert parse("13.10.2026", today) is None
+    assert parse("01.01.1899", today) is None

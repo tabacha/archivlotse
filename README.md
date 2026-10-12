@@ -221,8 +221,10 @@ pipeline:
   - ocr_check
   - document_type
   - correspondent
+  - document_date
   - tags
   - title
+  - mark_done
 
 steps:
   title:
@@ -384,6 +386,37 @@ Score **nicht** benutzt, um zu entscheiden, ob das Docling-Ergebnis
 übernommen wird – nur, um zu entscheiden, ob überhaupt ein Re-OCR-Versuch
 lohnt. Bei Bedarf `quality_threshold` anpassen oder stichprobenartig mit
 `--dry-run --verbose` nachprüfen.
+
+**Datums-Schritt `document_date`:** bestimmt das Erstellungsdatum
+(Paperless-Feld `created`) aus dem OCR-Text, mit zwei Prompts:
+
+- Text bis `small_max_chars` (8.000) Zeichen: einmal komplett mit
+  `create-date-small.j2` analysieren; ein gültiges Datum wird übernommen.
+- Längere Texte: zuerst die ersten `part_chars` (6.000) Zeichen mit
+  `create-date-part.j2` (Antwort `TT.MM.JJJJ|Score`). Bei Score ≥
+  `min_score` (85) wird das Datum übernommen und nicht weiter gesucht,
+  sonst zusätzlich die letzten 6.000 Zeichen; das gültige Datum mit dem
+  höchsten Score gewinnt.
+- Liegt der beste Score unter `min_score`, wird das Datum nur gesetzt,
+  wenn das Feld noch leer ist – ein vorhandenes Datum wird nie durch eine
+  unsichere Schätzung überschrieben.
+
+Jede Antwort wird im Code geprüft: exakt im erwarteten Format, gültiges
+Kalenderdatum, nicht in der Zukunft, nicht vor 1900. Alles andere zählt
+als "kein Datum gefunden".
+
+```yaml
+  document_date:
+    source_field: content
+    target_field: created
+    prompt: create-date-part.j2 # fuer Abschnitte langer Dokumente
+    model: "mistral-small-3.2-24b-instruct-2506"
+    date:
+      prompt_small: create-date-small.j2 # fuer kurze Dokumente
+      small_max_chars: 8000
+      part_chars: 6000
+      min_score: 85
+```
 
 **Tag-Setz-Schritt `mark_done`:** ebenfalls ohne KI – hängt feste,
 **in Paperless bereits vorhandene** Tags an das Dokument an (vorhandene
