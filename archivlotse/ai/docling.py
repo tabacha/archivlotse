@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import httpx
 
-from .errors import ServiceError
+from ..errors import ServiceError
+from .base import AIResult
 
 
 def _format_errors(errors: list[dict] | None) -> str:
@@ -19,16 +20,19 @@ def _format_errors(errors: list[dict] | None) -> str:
 
 
 class DoclingClient:
-    """Client for a Docling Serve instance (document conversion/OCR)."""
+    """OCR client for a Docling Serve instance - same ocr_pdf interface as
+    OpenAICompatibleClient, so the OCR step doesn't care which one it got.
+    Every page is OCR'd anew (force_ocr): the OCR step only sends scans,
+    whose existing text layer is exactly what's being replaced."""
 
-    def __init__(self, base_url: str, timeout: float = 300.0):
+    def __init__(self, base_url: str, timeout: float = 600.0):
         self._client = httpx.Client(base_url=base_url, timeout=timeout)
 
-    def convert_to_text(self, filename: str, content: bytes, force_ocr: bool = True) -> str:
+    def ocr_pdf(self, pdf_bytes: bytes, filename: str) -> AIResult:
         response = self._client.post(
             "/v1/convert/file",
-            files={"files": (filename, content, "application/pdf")},
-            data={"to_formats": "text", "force_ocr": "true" if force_ocr else "false"},
+            files={"files": (filename, pdf_bytes, "application/pdf")},
+            data={"to_formats": "text", "force_ocr": "true"},
         )
         response.raise_for_status()
         data = response.json()
@@ -38,13 +42,7 @@ class DoclingClient:
                 f"Docling-Konvertierung fehlgeschlagen (status={status!r}): "
                 f"{_format_errors(data.get('errors'))}"
             )
-        return data["document"].get("text_content") or ""
+        return AIResult(text=(data.get("document") or {}).get("text_content") or "")
 
     def close(self) -> None:
         self._client.close()
-
-    def __enter__(self) -> "DoclingClient":
-        return self
-
-    def __exit__(self, *exc_info) -> None:
-        self.close()

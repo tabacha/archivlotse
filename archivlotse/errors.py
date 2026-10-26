@@ -6,7 +6,7 @@ import httpx
 
 
 class ServiceError(RuntimeError):
-    """An external service (e.g. Docling) answered, but reported a failure.
+    """An external service (e.g. an OCR model) answered, but reported a failure.
     The message is meant to be self-explanatory - logged as one line, no
     traceback."""
 

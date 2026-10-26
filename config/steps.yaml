@@ -16,7 +16,7 @@
 # Kontext). Im --dry-run sieht ein spaeterer Schritt die Aenderung eines
 # frueheren Schritts NICHT, da dann nichts tatsaechlich geschrieben wird.
 pipeline:
-  - ocr_check
+  - ocr
   - document_type
   - correspondent
   - document_date
@@ -26,27 +26,36 @@ pipeline:
   - mark_done
 
 steps:
-  # Vorhandenen OCR-Text auf Qualitaet pruefen und bei Bedarf per Docling
-  # Serve neu erkennen (force_ocr). Kein KI-Aufruf noetig
-  # (quality_check: heuristic), daher auch kein prompt/model.
-  # quality_check: ai_judge ist als Alternative vorgesehen, aber noch
-  # nicht implementiert.
-  ocr_check:
+  # Gescannte Dokumente per OCR (Docling oder ein OCR-Modell) neu erkennen und den
+  # Text in Paperless ersetzen. Ob ein Dokument ein Scan ist, wird am
+  # Aufbau der Datei entschieden, nicht an der Qualitaet des vorhandenen
+  # Texts (archivlotse/pdf_text.py): ein PDF mit mindestens einer Seite,
+  # die nur Bild und keinen sichtbaren Text zeigt (eine unsichtbare
+  # OCR-Textebene von Scanner/Paperless zaehlt nicht), sowie Bild-Originale
+  # (die als PDF-Archivfassung aus Paperless geschickt werden). PDFs mit
+  # echtem Text, E-Mails usw. werden nicht angefasst.
+  # Jedes Dokument wird nur einmal erkannt (Cache je Datei + Modell); ein
+  # danach in Paperless von Hand korrigierter Text wird nicht wieder
+  # ueberschrieben (ausser mit --force).
+  ocr:
     source_field: content
-    target_field: content # gleiches Feld: aktualisiert den Text, falls besser
+    target_field: content
 
-    quality_check: heuristic
-    # Schwelle bewusst konservativ gewaehlt (Heuristik calibriert an
-    # echten Dokumenten, siehe archivlotse/ocr_quality.py fuer bekannte
-    # Grenzen, z.B. bei zahlenlastigen Dokumenten).
-    quality_threshold: 0.50
-    # Kuerzere Texte werden nicht geprueft (Heuristik auf wenig Text
-    # unzuverlässig).
-    min_chars_for_check: 200
-
-    docling:
-      base_url: "http://127.0.0.1:5001"
-      force_ocr: true
+    ocr:
+      # Modell aus config/ai.yaml (models:). Zur Wahl:
+      # - "docling": lokales Docling Serve (Provider-Typ docling), kostenlos
+      #   und schnell (Sekunden pro Seite). Liest Zeichen sauber, reisst
+      #   aber Tabellen auseinander (bei Kontoauszuegen stehen Buchung und
+      #   Betrag dann nicht mehr in einer Zeile).
+      # - "lightonocr-3-0.8b": LightOnOCR bei Scaleway, ca. 0,2 Cent pro
+      #   Seite. Im Vergleich (Dok. 5271, 5743) deutlich besser bei
+      #   Tabellen, aber teils minutenlange Wartezeit bei Scaleway.
+      # Einzelnes Dokument mit dem anderen testen:
+      #   archivlotse process <id> --step ocr --model lightonocr-3-0.8b --dry-run
+      model: "docling"
+      # Sekunden; lange Dokumente (50 Seiten) brauchen deutlich laenger als
+      # ein normaler Prompt.
+      timeout: 600
 
   document_type:
     source_field: content

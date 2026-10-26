@@ -34,6 +34,13 @@ providers:
     access_key_id: "SCWxxxxxxxxxxxxxxxxx"
     secret_key: "${SCALEWAY_SECRET_KEY}"
 
+  # Lokales Docling Serve (https://github.com/docling-project/docling-serve)
+  # fuer den OCR-Schritt, z.B. per Docker:
+  #   docker run -p 5001:5001 quay.io/docling-project/docling-serve
+  docling_lokal:
+    type: docling
+    base_url: "http://127.0.0.1:5001"
+
 # price_per_1m_input/output (USD je 1 Million Tokens) sind optional,
 # aktivieren aber die Kostenschaetzung im Log und in step_results (siehe
 # README "Kosten pro KI-Aufruf"). Fuer ollama-Modelle nicht noetig - lokale
@@ -62,3 +69,15 @@ models:
     provider: scaleway
     price_per_1m_input: 0.90
     price_per_1m_output: 0.90
+
+  # OCR fuer den Schritt ocr per lokalem Docling (kein KI-Sprachmodell,
+  # kein Preis noetig - lokal = $0).
+  docling:
+    provider: docling_lokal
+
+  # OCR-Modell fuer den Schritt ocr (bekommt das PDF selbst, keinen
+  # Prompt). Output ist bei Scaleway kostenlos.
+  "lightonocr-3-0.8b":
+    provider: scaleway
+    price_per_1m_input: 2.20
+    price_per_1m_output: 0.00

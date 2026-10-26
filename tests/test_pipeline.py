@@ -6,6 +6,7 @@ import pytest
 import archivlotse.pipeline as pipeline_module
 from archivlotse.ai.base import AIResult
 from archivlotse.config import AIConfig, PaperlessConfig
+from archivlotse.pdf_text import PdfAnalysis
 from archivlotse.steps import StepConfig
 
 FAKE_STEP_CONFIG = StepConfig(
@@ -41,6 +42,8 @@ class FakePaperlessClient:
         self.custom_fields = custom_fields or []
         self.original_bytes = original_bytes
         self.download_calls = 0
+        self.archive_bytes = b"%PDF-archiv%"
+        self.download_archive_calls = 0
         self.list_document_types_calls = 0
         self.list_tags_calls = 0
         self.list_correspondents_calls = 0
@@ -78,6 +81,10 @@ class FakePaperlessClient:
     def download_original(self, document_id):
         self.download_calls += 1
         return self.original_bytes
+
+    def download_archive(self, document_id):
+        self.download_archive_calls += 1
+        return self.archive_bytes
 
 
 class FakeAIClient:
@@ -459,38 +466,36 @@ def test_process_step_runs_when_condition_met(monkeypatch, tmp_path):
 
 
 FAKE_OCR_STEP_CONFIG = StepConfig(
-    name="ocr_check",
-    prompt=None,
-    model=None,
+    name="ocr",
     source_field="content",
     target_field="content",
-    quality_check="heuristic",
-    quality_threshold=0.5,
-    min_chars_for_check=10,
-    docling_base_url="http://docling.example",
+    ocr_model="lightonocr",
+)
+
+FAKE_OCR_AI_CONFIG = AIConfig(
+    provider="scaleway",
+    base_url="http://ai.example",
+    model="lightonocr",
+    secret_key="k",
+    price_per_1m_input=2.2,
+    price_per_1m_output=0.0,
 )
 
 
-class FakeDoclingClient:
-    def __init__(self, text="Dies ist ein ordentlicher deutscher Satz mit Wörtern.", **kwargs):
+class FakeOCRClient:
+    def __init__(self, text="Kontoauszug\n\n14.01 BAEDERLAND HH 125,00"):
         self.text = text
-        self.calls = 0
+        self.calls: list[bytes] = []
 
-    def convert_to_text(self, filename, content, force_ocr=True):
-        self.calls += 1
-        return self.text
+    def ocr_pdf(self, pdf_bytes, filename):
+        self.calls.append(pdf_bytes)
+        return AIResult(text=self.text, prompt_tokens=1000, completion_tokens=200)
 
     def close(self):
         pass
 
-    def __enter__(self):
-        return self
 
-    def __exit__(self, *exc_info):
-        self.close()
-
-
-def _patch_ocr_common(monkeypatch, fake_paperless, fake_docling_factory):
+def _patch_ocr_common(monkeypatch, fake_paperless, fake_ocr, scanned_pages=1):
     monkeypatch.setattr(
         pipeline_module,
         "load_paperless_config",
@@ -499,65 +504,128 @@ def _patch_ocr_common(monkeypatch, fake_paperless, fake_docling_factory):
     monkeypatch.setattr(
         pipeline_module, "load_step_config", lambda name, path: FAKE_OCR_STEP_CONFIG
     )
+    monkeypatch.setattr(pipeline_module, "load_ai_config", lambda model, path: FAKE_OCR_AI_CONFIG)
     monkeypatch.setattr(pipeline_module, "PaperlessClient", lambda config: fake_paperless)
-    monkeypatch.setattr(pipeline_module, "DoclingClient", fake_docling_factory)
+    monkeypatch.setattr(pipeline_module, "build_ocr_client", lambda config, timeout: fake_ocr)
+    monkeypatch.setattr(
+        pipeline_module,
+        "analyze_pdf",
+        lambda pdf_bytes: PdfAnalysis(page_count=2, scanned_pages=scanned_pages),
+    )
+    fake_paperless.document["mime_type"] = "application/pdf"
 
 
-def test_ocr_step_skips_reocr_when_quality_already_good(monkeypatch, tmp_path):
+def _run_ocr(tmp_path, **kwargs):
+    return pipeline_module.process_step(
+        step_name="ocr", document_id=1, db_path=str(tmp_path / "test.db"), **kwargs
+    )
+
+
+def test_ocr_step_leaves_pdf_with_real_text_alone(monkeypatch, tmp_path):
     fake_paperless = FakePaperlessClient()
-    fake_paperless.document["content"] = (
-        "Dies ist ein ganz normaler, gut lesbarer deutscher Text mit vielen "
-        "gewöhnlichen Wörtern und Sätzen, der keine Verbesserung braucht."
-    )
-    docling_calls = []
-    _patch_ocr_common(
-        monkeypatch, fake_paperless, lambda **kw: docling_calls.append(kw) or FakeDoclingClient()
-    )
+    fake_ocr = FakeOCRClient()
+    _patch_ocr_common(monkeypatch, fake_paperless, fake_ocr, scanned_pages=0)
 
-    result = pipeline_module.process_step(
-        step_name="ocr_check", document_id=1, db_path=str(tmp_path / "test.db")
-    )
-
-    assert result is None
-    assert docling_calls == []  # kein Docling-Aufruf noetig
-    assert fake_paperless.download_calls == 0
+    assert _run_ocr(tmp_path) is None
+    assert fake_ocr.calls == []
     assert fake_paperless.update_calls == []
 
 
-def test_ocr_step_reocrs_and_applies_when_quality_bad(monkeypatch, tmp_path):
-    fake_paperless = FakePaperlessClient()
-    fake_paperless.document["content"] = "xq zrv kpt wmb flo " * 20  # Kauderwelsch, kein Wort>=3 bekannt
-    fake_docling = FakeDoclingClient(
-        text=(
-            "Dies ist ein ordentlicher deutscher Satz mit vielen Wörtern, "
-            "der nach der erneuten Erkennung viel besser lesbar ist."
-        )
-    )
-    _patch_ocr_common(monkeypatch, fake_paperless, lambda **kw: fake_docling)
+def test_ocr_step_ocrs_scanned_pdf_and_replaces_text(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient(original_bytes=b"%PDF-scan%")
+    fake_ocr = FakeOCRClient()
+    _patch_ocr_common(monkeypatch, fake_paperless, fake_ocr)
 
-    result = pipeline_module.process_step(
-        step_name="ocr_check", document_id=1, db_path=str(tmp_path / "test.db")
-    )
+    result = _run_ocr(tmp_path)
 
     assert result is not None
-    assert fake_docling.calls == 1
-    assert fake_paperless.download_calls == 1
-    assert fake_paperless.update_calls[0][0] == "content"
-    assert fake_paperless.update_calls[0][1] == fake_docling.text
+    assert fake_ocr.calls == [b"%PDF-scan%"]  # das Original, nicht die Archivfassung
+    assert fake_paperless.update_calls == [("content", fake_ocr.text)]
 
 
-def test_ocr_step_rejects_docling_result_that_is_far_shorter(monkeypatch, tmp_path):
+def test_ocr_step_sends_archive_pdf_for_image_original(monkeypatch, tmp_path):
     fake_paperless = FakePaperlessClient()
-    fake_paperless.document["content"] = "xq zrv kpt wmb flo " * 20
-    fake_docling = FakeDoclingClient(text="zu kurz")
-    _patch_ocr_common(monkeypatch, fake_paperless, lambda **kw: fake_docling)
+    fake_ocr = FakeOCRClient()
+    _patch_ocr_common(monkeypatch, fake_paperless, fake_ocr)
+    fake_paperless.document["mime_type"] = "image/jpeg"
 
-    result = pipeline_module.process_step(
-        step_name="ocr_check", document_id=1, db_path=str(tmp_path / "test.db")
-    )
+    _run_ocr(tmp_path)
 
-    assert result is None
+    assert fake_ocr.calls == [b"%PDF-archiv%"]
+    assert fake_paperless.download_calls == 0
+    assert fake_paperless.update_calls[0][0] == "content"
+
+
+def test_ocr_step_skips_documents_with_native_text(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient()
+    fake_ocr = FakeOCRClient()
+    _patch_ocr_common(monkeypatch, fake_paperless, fake_ocr)
+    fake_paperless.document["mime_type"] = "message/rfc822"
+
+    assert _run_ocr(tmp_path) is None
+    assert fake_ocr.calls == []
+    assert fake_paperless.download_calls == 0
+
+
+def test_ocr_step_ocrs_only_once_and_applies_cached_result_after_dry_run(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient()
+    fake_ocr = FakeOCRClient()
+    _patch_ocr_common(monkeypatch, fake_paperless, fake_ocr)
+
+    _run_ocr(tmp_path, dry_run=True)
     assert fake_paperless.update_calls == []
+    _run_ocr(tmp_path)
+    _run_ocr(tmp_path)
+
+    assert len(fake_ocr.calls) == 1
+    assert fake_paperless.update_calls == [("content", fake_ocr.text)]
+
+
+def test_ocr_step_does_not_overwrite_manual_correction_from_cache(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient()
+    fake_ocr = FakeOCRClient()
+    _patch_ocr_common(monkeypatch, fake_paperless, fake_ocr)
+
+    _run_ocr(tmp_path)
+    fake_paperless.document["content"] = "von Hand korrigiert"
+    _run_ocr(tmp_path)
+    assert fake_paperless.document["content"] == "von Hand korrigiert"
+    assert len(fake_ocr.calls) == 1
+
+    _run_ocr(tmp_path, force=True)
+    assert len(fake_ocr.calls) == 2
+    assert fake_paperless.document["content"] == fake_ocr.text
+
+
+def test_ocr_step_rejects_empty_result(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient()
+    fake_ocr = FakeOCRClient(text="![image](image_1.png)\n")
+    _patch_ocr_common(monkeypatch, fake_paperless, fake_ocr)
+
+    assert _run_ocr(tmp_path) is None
+    assert fake_paperless.update_calls == []
+
+
+def test_ocr_step_rejects_result_far_shorter_than_existing_text(monkeypatch, tmp_path):
+    fake_paperless = FakePaperlessClient()
+    fake_paperless.document["content"] = "Kassenbon Tankstelle Super E10 70,91 EUR " * 10
+    fake_ocr = FakeOCRClient(text="![image](image_1.png)\n\nUSt-ID: DE364 108 864.")
+    _patch_ocr_common(monkeypatch, fake_paperless, fake_ocr)
+
+    assert _run_ocr(tmp_path) is None
+    assert fake_paperless.update_calls == []
+
+
+def test_clean_ocr_text_flattens_html_tables_and_drops_image_placeholders():
+    raw = (
+        "![image](image_1.png)\n\n"
+        "Kontoauszug  \n"
+        "<table>\n  <tr>\n    <td>14.01 REWE</td>\n    <td></td>\n    <td>31,30</td>\n  </tr>\n"
+        "  <tr><td>A &amp; B</td><td>0,79</td></tr>\n</table>\n\n\n\nEnde"
+    )
+    assert pipeline_module._clean_ocr_text(raw) == (
+        "Kontoauszug\n14.01 REWE | 31,30\nA & B | 0,79\n\nEnde"
+    )
 
 
 def test_process_pipeline_runs_all_steps_in_order_and_survives_a_failure(monkeypatch, tmp_path):
@@ -819,6 +887,11 @@ def test_multi_choice_step_passes_current_tags_to_prompt(monkeypatch, tmp_path):
 def test_estimate_cost_is_zero_for_ollama_regardless_of_pricing():
     config = AIConfig(provider="ollama", base_url="http://x", model="m")
     assert pipeline_module._estimate_cost(config, 1000, 1000) == 0.0
+
+
+def test_estimate_cost_is_zero_for_docling_without_usage_data():
+    config = AIConfig(provider="docling", base_url="http://x", model="docling")
+    assert pipeline_module._estimate_cost(config, None, None) == 0.0
 
 
 def test_estimate_cost_returns_none_without_configured_pricing():

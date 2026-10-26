@@ -76,7 +76,16 @@ class PaperlessClient:
         return self._list_all("/api/documents/", params=params)
 
     def download_original(self, document_id: int) -> bytes:
-        """Fetch the original (unmodified) document file."""
+        """Fetch the original (unmodified) document file, as uploaded."""
+        response = self._client.get(
+            f"/api/documents/{document_id}/download/", params={"original": "true"}
+        )
+        response.raise_for_status()
+        return response.content
+
+    def download_archive(self, document_id: int) -> bytes:
+        """Fetch Paperless' archived PDF/A version (exists e.g. for image
+        and e-mail originals, which Paperless converts to PDF on import)."""
         response = self._client.get(f"/api/documents/{document_id}/download/")
         response.raise_for_status()
         return response.content

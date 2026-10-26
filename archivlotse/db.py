@@ -150,6 +150,18 @@ def save_step_result(
     conn.commit()
 
 
+def field_written_since(
+    conn: sqlite3.Connection, document_id: int, field_name: str, since: str
+) -> bool:
+    """Whether the audit log records a write of `field_name` on
+    `document_id` at or after the ISO timestamp `since`."""
+    row = conn.execute(
+        "SELECT 1 FROM audit_log WHERE document_id = ? AND field_name = ? AND changed_at >= ? LIMIT 1",
+        (document_id, field_name, since),
+    ).fetchone()
+    return row is not None
+
+
 def get_cached_candidates(
     conn: sqlite3.Connection, endpoint: str, max_age_seconds: float
 ) -> list[dict] | None:
@@ -171,7 +183,7 @@ def get_cached_candidates(
 
 def clear_caches(conn: sqlite3.Connection) -> tuple[int, int]:
     """Delete all cached step results and candidate lists - everything
-    that exists purely to avoid redundant AI/Docling/Paperless calls, NOT
+    that exists purely to avoid redundant AI/OCR/Paperless calls, NOT
     the audit_log (a permanent history, not a cache). Useful after
     reorganizing Paperless metadata (e.g. renaming/restructuring tags) so
     stale cached suggestions don't linger. Returns (step_results_deleted,

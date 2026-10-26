@@ -25,12 +25,14 @@ class StepConfig:
     # Schritt NIE loeschen darf, unabhaengig davon, was die KI vorschlaegt.
     # Schutz auf Code-/Config-Ebene, nicht nur per Prompt-Anweisung.
     protected_candidates: list[str] = field(default_factory=list)
-    # Nur fuer OCR-Qualitaetsschritte (quality_check gesetzt):
-    quality_check: str | None = None
-    quality_threshold: float = 0.6
-    min_chars_for_check: int = 200
-    docling_base_url: str | None = None
-    docling_force_ocr: bool = True
+    # Nur fuer OCR-Schritte (ocr_model gesetzt): Name eines OCR-Modells aus
+    # config/ai.yaml (models:) - ein lokales Docling Serve (Provider-Typ
+    # "docling") oder ein OCR-Modell wie LightOnOCR (Provider "scaleway"). Neu erkannt werden nur
+    # gescannte PDFs/Bilder, nie PDFs mit echtem Text (archivlotse/pdf_text.py).
+    ocr_model: str | None = None
+    # Wie lange (Sekunden) auf das OCR-Ergebnis gewartet wird - ein langes
+    # Dokument dauert deutlich laenger als ein normaler Prompt.
+    ocr_timeout: float = 600.0
     # Schritt nur ausfuehren, wenn das genannte Feld (bzw. bei
     # "document_type" dessen aufgeloester Name) dem erwarteten Wert
     # entspricht, z.B. {"document_type": "Kontoauszug"} - oder einem von
@@ -106,12 +108,13 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
     back - an answer that doesn't match an existing candidate is rejected
     rather than applied.
 
-    If quality_check is set (e.g. "heuristic"), this is instead an OCR
-    quality-check/improve step: no AI model/prompt is used at all. See
-    archivlotse/ocr_quality.py and archivlotse/docling.py.
+    If ocr_model is set (an `ocr: {model: ...}` block), this is instead an
+    OCR step: no prompt, the document file itself goes to the OCR model -
+    but only if it's a scan (see archivlotse/pdf_text.py), never a PDF that
+    already carries real text.
 
-    If condition is set, the step is skipped entirely (no AI/Docling
-    call) unless the document's current field value(s) match.
+    If condition is set, the step is skipped entirely (no AI/OCR call)
+    unless the document's current field value(s) match.
 
     protected_candidates (multi-choice steps only) lists candidate names
     that may never be removed, regardless of what the AI suggests - an
@@ -155,9 +158,16 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
 
     preprocessing = step.get("preprocessing", {}) or {}
     postprocessing = step.get("postprocessing", {}) or {}
-    docling = step.get("docling", {}) or {}
+    ocr = step.get("ocr", {}) or {}
     date = step.get("date", {}) or {}
-    quality_check = step.get("quality_check")
+    legacy_ocr_keys = {"quality_check", "quality_threshold", "min_chars_for_check", "docling"}
+    if legacy_ocr_keys & set(step):
+        raise ValueError(
+            f"Schritt {name!r}: quality_check/docling gibt es nicht mehr - OCR-Schritte "
+            "werden jetzt mit 'ocr: {model: <Modell aus config/ai.yaml>}' konfiguriert, "
+            "Docling als Provider vom Typ 'docling' in config/ai.yaml "
+            "(siehe config/steps.yaml, Schritt ocr, und config/ai.example.yaml)"
+        )
     custom_field = step.get("custom_field")
     target_field = step.get("target_field") or ("custom_fields" if custom_field else None)
     if not target_field:
@@ -175,11 +185,8 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
         candidates_endpoint=step.get("candidates_endpoint"),
         multi=step.get("multi", False),
         protected_candidates=list(step.get("protected_candidates") or []),
-        quality_check=quality_check,
-        quality_threshold=step.get("quality_threshold", 0.6),
-        min_chars_for_check=step.get("min_chars_for_check", 200),
-        docling_base_url=docling.get("base_url"),
-        docling_force_ocr=docling.get("force_ocr", True),
+        ocr_model=ocr.get("model"),
+        ocr_timeout=ocr.get("timeout", 600.0),
         condition=step.get("condition"),
         prompt_step2=step.get("prompt_step2"),
         model_step2=step.get("model_step2"),
@@ -204,22 +211,12 @@ def load_step_config(name: str, path: str | Path = "config/steps.yaml") -> StepC
     if not config.source_field:
         raise ValueError(f"Schritt {name!r}: 'source_field' ist erforderlich")
 
-    if quality_check:
-        if quality_check not in ("heuristic", "ai_judge"):
-            raise ValueError(
-                f"Schritt {name!r}: unbekannter quality_check {quality_check!r} "
-                "(erwartet 'heuristic' oder 'ai_judge')"
-            )
-        if quality_check == "ai_judge" and (not config.prompt or not config.model):
-            raise ValueError(
-                f"Schritt {name!r}: quality_check 'ai_judge' benötigt 'prompt' und 'model'"
-            )
-        if quality_check == "heuristic" and not config.docling_base_url:
-            raise ValueError(f"Schritt {name!r}: quality_check benötigt 'docling.base_url'")
-    elif not config.prompt or not config.model:
+    if ocr and not config.ocr_model:
+        raise ValueError(f"Schritt {name!r}: 'ocr' benötigt 'model'")
+    if not config.ocr_model and (not config.prompt or not config.model):
         raise ValueError(
             f"Schritt {name!r}: 'prompt' und 'model' sind erforderlich (außer bei "
-            "quality_check- und add_tags-Schritten)"
+            "ocr- und add_tags-Schritten)"
         )
 
     if config.custom_field and config.target_field != "custom_fields":

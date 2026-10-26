@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import html
 import logging
 import re
 import sqlite3
@@ -10,21 +11,21 @@ from typing import Callable
 import httpx
 from rapidfuzz import fuzz, process
 
-from .ai.factory import build_ai_client
+from .ai.factory import build_ai_client, build_ocr_client
 from .config import AIConfig, load_ai_config, load_paperless_config
 from .db import (
     append_audit_log,
     clear_caches,
+    field_written_since,
     get_cached_candidates,
     get_cached_step_result,
     init_db,
     save_candidates,
     save_step_result,
 )
-from .docling import DoclingClient
-from .errors import log_failure
-from .ocr_quality import ocr_quality_score
+from .errors import ServiceError, log_failure
 from .paperless import PaperlessClient
+from .pdf_text import analyze_pdf
 from .prompts import load_prompt_source, render_prompt
 from .steps import StepConfig, load_pipeline_order, load_step_config
 
@@ -97,12 +98,25 @@ CANDIDATE_FETCHERS: dict[str, Callable[[PaperlessClient], list[dict]]] = {
 # caching avoids a Paperless round-trip per step.
 CANDIDATE_CACHE_TTL_SECONDS = 2 * 60 * 60  # 2 Stunden
 
-# A new OCR result must be at least this fraction of the previous text's
-# length to be accepted - a cheap sanity floor against Docling returning
-# near-empty output (e.g. on an unsupported/corrupt file), independent of
-# the quality-score comparison (see ocr_quality.py for why before/after
-# scores aren't compared directly).
+# An OCR result must be at least this fraction of the existing text's
+# length to replace it. Not a quality check deciding whether to OCR - a
+# safety net after OCR: LightOnOCR sometimes treats a photographed page
+# (e.g. a receipt) as a picture and transcribes only a fragment of it,
+# which must not replace usable text.
 MIN_OCR_LENGTH_RATIO = 0.3
+
+# Provider types (config/ai.yaml: providers.<name>.type) that run locally -
+# their calls always count as $0 in the cost estimate.
+LOCAL_PROVIDERS = {"ollama", "docling"}
+
+# Markup in LightOnOCR's (markdown) output that doesn't belong into
+# Paperless' plain-text content field: image placeholders, and tables as
+# HTML (turned into one line per row, cells separated by " | ").
+_OCR_IMAGE_PLACEHOLDER = re.compile(r"^[ \t]*!\[[^\]]*\]\([^)]*\)[ \t]*$", re.MULTILINE)
+_HTML_TABLE = re.compile(r"<table\b.*?</table>", re.DOTALL | re.IGNORECASE)
+_HTML_ROW = re.compile(r"<tr\b.*?</tr>", re.DOTALL | re.IGNORECASE)
+_HTML_CELL = re.compile(r"<t[dh]\b[^>]*>(.*?)</t[dh]>", re.DOTALL | re.IGNORECASE)
+_HTML_TAG = re.compile(r"<[^>]+>")
 
 
 def _fingerprint(*parts: str) -> str:
@@ -182,11 +196,11 @@ def _estimate_cost(
     ai_config: AIConfig, prompt_tokens: int | None, completion_tokens: int | None
 ) -> float | None:
     """Estimate the USD cost of one AI call from its token usage. Ollama
-    runs locally, so it's always treated as free ($0), independent of
-    whether pricing is configured. For other providers, returns None if
+    and Docling run locally, so they're always treated as free ($0),
+    independent of whether pricing is configured. For other providers, returns None if
     pricing (config/ai.yaml: price_per_1m_input/output) or usage data
     isn't available, rather than silently guessing $0."""
-    if ai_config.provider == "ollama":
+    if ai_config.provider in LOCAL_PROVIDERS:
         return 0.0
     if ai_config.price_per_1m_input is None or ai_config.price_per_1m_output is None:
         return None
@@ -200,6 +214,8 @@ def _estimate_cost(
 
 def _log_usage(document_id: int, step_name: str, ai_config: AIConfig, ai_result) -> float | None:
     cost = _estimate_cost(ai_config, ai_result.prompt_tokens, ai_result.completion_tokens)
+    if ai_config.provider in LOCAL_PROVIDERS and ai_result.prompt_tokens is None:
+        return cost  # e.g. Docling: no tokens to report, nothing to pay
     cost_str = f"${cost:.6f}" if cost is not None else "unbekannt (kein Preis konfiguriert)"
     logger.info(
         "Dokument %s, Schritt %r: Tokenverbrauch prompt=%s completion=%s, geschätzte Kosten: %s",
@@ -322,8 +338,8 @@ def process_pipeline(
     is actually written, so later steps still see the original values.
 
     A step that raises is logged and skipped rather than aborting the
-    rest of the pipeline, so e.g. an unreachable Docling instance for
-    ocr_check doesn't block document_type/title from still running - with
+    rest of the pipeline, so e.g. a failing OCR call in
+    ocr doesn't block document_type/title from still running - with
     one exception: a 404 fetching the document itself means the document
     doesn't exist at all, which will fail identically for every remaining
     step. Rather than repeating the same failure (and a full traceback)
@@ -331,7 +347,7 @@ def process_pipeline(
     message.
 
     force=True ignores any cached step_results/candidate_cache entry, so
-    every AI/Docling call and every candidate-list fetch happens again,
+    every AI/OCR call and every candidate-list fetch happens again,
     even for an unchanged document.
     """
     order = step_names if step_names is not None else load_pipeline_order(steps_config_path)
@@ -421,10 +437,9 @@ def process_step(
       are dropped, not fatal to the step), and the final value is
       `(current | add) - delete` - existing values are kept unless the AI
       explicitly proposes removing them.
-    - OCR quality check (step has `quality_check` set): no AI model/prompt
-      at all - estimate the existing text's OCR quality, and only if it's
-      below quality_threshold, re-OCR the original file via Docling Serve
-      and (if the result passes a basic sanity check) write it back.
+    - OCR step (step has `ocr: {model: ...}` set): see _process_ocr_step -
+      a scanned PDF/image is transcribed by the OCR model and the result
+      replaces the text; a PDF with real text is left alone.
     - Document-date step (step has `date: {prompt_small: ...}` set): see
       _process_date_step - one full-text AI call for short documents,
       otherwise first/last part with a confidence score per answer.
@@ -440,20 +455,20 @@ def process_step(
       (prompt_step2/model_step2) with the closest few candidates to
       disambiguate.
 
-    All shapes except the OCR check also support a `condition`: the step
+    All shapes except the OCR step also support a `condition`: the step
     is skipped entirely (no AI call) unless the document's current
     field(s) match the configured expectation.
 
     Already-computed results are cached in SQLite (keyed by a fingerprint
     of the input, prompt version, AI provider/model, postprocessing
     rules, and - for choice steps - the candidate list), so unchanged
-    documents never trigger a repeat AI/Docling call. The audit log only
+    documents never trigger a repeat AI/OCR call. The audit log only
     ever gets a row when a field is actually written to Paperless (never
     on cache hits, no-ops, rejected suggestions, skipped conditions, or
     --dry-run).
 
     force=True ignores any cached step_results/candidate_cache entry for
-    this step, so the AI/Docling call and candidate-list fetch happen
+    this step, so the AI/OCR call and candidate-list fetch happen
     again even if the input hasn't changed since the last run.
     """
     step_config = load_step_config(step_name, steps_config_path)
@@ -461,8 +476,11 @@ def process_step(
     conn = init_db(db_path)
 
     with PaperlessClient(paperless_config) as paperless:
-        if step_config.quality_check:
-            return _process_ocr_step(step_config, paperless, conn, document_id, dry_run, force)
+        if step_config.ocr_model:
+            ai_config = load_ai_config(model or step_config.ocr_model, ai_config_path)
+            return _process_ocr_step(
+                step_config, ai_config, paperless, conn, document_id, dry_run, force
+            )
         if step_config.add_tags:
             return _process_add_tags_step(step_config, paperless, conn, document_id, dry_run, force)
 
@@ -1566,138 +1584,181 @@ def _apply_value(
     return new_value
 
 
+def _table_to_text(match: re.Match) -> str:
+    lines = []
+    for row in _HTML_ROW.findall(match.group(0)):
+        cells = [" ".join(html.unescape(_HTML_TAG.sub(" ", cell)).split()) for cell in _HTML_CELL.findall(row)]
+        cells = [cell for cell in cells if cell]
+        if cells:
+            lines.append(" | ".join(cells))
+    return "\n".join(lines)
+
+
+def _clean_ocr_text(raw: str) -> str:
+    """Turn the OCR model's markdown into plain text for Paperless."""
+    text = _OCR_IMAGE_PLACEHOLDER.sub("", raw)
+    text = _HTML_TABLE.sub(_table_to_text, text)
+    text = re.sub(r"[ \t]+\n", "\n", text)  # markdown hard line breaks ("  ")
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _text_summary(text: str) -> str:
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
+    return f"[{len(text)} Zeichen, {digest}]"
+
+
 def _process_ocr_step(
     step_config: StepConfig,
+    ai_config: AIConfig,
     paperless: PaperlessClient,
     conn: sqlite3.Connection,
     document_id: int,
     dry_run: bool,
     force: bool = False,
 ) -> str | None:
-    """OCR quality check/improve step. No AI model or prompt is used.
+    """Re-OCR a scanned document with the configured OCR engine (a local
+    Docling Serve, or an OCR model like LightOnOCR - both are entries
+    under models: in config/ai.yaml) and replace its text - no prompt, no quality metric deciding whether to.
 
-    The existing text's quality is estimated first (cheap, no network
-    call beyond fetching the document); only if it's below
-    quality_threshold is the original file downloaded and re-OCR'd via
-    Docling Serve. The new text is written back only if it passes a
-    basic sanity floor (see MIN_OCR_LENGTH_RATIO) - see ocr_quality.py
-    for why old/new quality scores are deliberately NOT compared
-    directly to decide whether to accept the new text.
+    Only scans are sent: a PDF original is analyzed structurally first
+    (archivlotse/pdf_text.py) and left alone if it already carries real,
+    visible text on every page; an image original is always a scan and is
+    sent as Paperless' archived PDF (the OCR API only takes PDFs). Other
+    originals (e-mail, plain text, office files) have native text and are
+    skipped.
+
+    A result far shorter than the existing text (MIN_OCR_LENGTH_RATIO) is
+    not applied: the OCR model then most likely skipped part of the page.
+
+    The raw OCR answer is cached by a hash of the file sent plus the model,
+    so a document is OCR'd (and paid for) once. A cached result is applied
+    unless it was already written before and the text has been changed in
+    Paperless since - a manual correction is never overwritten by a cache
+    hit (only by --force, which OCRs again).
     """
     document = paperless.get_document(document_id)
     old_text = str(document.get(step_config.source_field) or "")
+    mime_type = str(document.get("mime_type") or "")
 
-    if len(old_text.strip()) < step_config.min_chars_for_check:
+    if mime_type == "application/pdf":
+        pdf_bytes = paperless.download_original(document_id)
+        analysis = analyze_pdf(pdf_bytes)
+        if not analysis.needs_ocr:
+            logger.info(
+                "Dokument %s, Schritt %r: PDF enthält bereits echten Text (%d Seite(n)), kein OCR nötig",
+                document_id,
+                step_config.name,
+                analysis.page_count,
+            )
+            return None
         logger.info(
-            "Dokument %s, Schritt %r: Text zu kurz (%d Zeichen) für Qualitätsprüfung, übersprungen",
+            "Dokument %s, Schritt %r: %d von %d Seite(n) gescannt, OCR via %s",
             document_id,
             step_config.name,
-            len(old_text.strip()),
+            analysis.scanned_pages,
+            analysis.page_count,
+            ai_config.model,
         )
-        return None
-
-    if step_config.quality_check == "ai_judge":
-        raise NotImplementedError(
-            f"Schritt {step_config.name!r}: quality_check 'ai_judge' ist noch nicht "
-            "implementiert - bitte 'heuristic' verwenden."
-        )
-    if step_config.quality_check != "heuristic":
-        raise ValueError(
-            f"Schritt {step_config.name!r}: unbekannter quality_check "
-            f"{step_config.quality_check!r} (erwartet 'heuristic' oder 'ai_judge')"
-        )
-
-    old_score = ocr_quality_score(old_text)
-    logger.info(
-        "Dokument %s, Schritt %r: OCR-Qualitätsscore des vorhandenen Texts=%.3f (Schwelle %.3f)",
-        document_id,
-        step_config.name,
-        old_score,
-        step_config.quality_threshold,
-    )
-
-    if old_score >= step_config.quality_threshold:
+    elif mime_type.startswith("image/"):
+        pdf_bytes = paperless.download_archive(document_id)
+        if not pdf_bytes.startswith(b"%PDF"):
+            raise ServiceError(
+                f"Dokument {document_id}: Bild-Original ohne PDF-Archivfassung in Paperless - "
+                "kann nicht per OCR-Modell erkannt werden"
+            )
         logger.info(
-            "Dokument %s, Schritt %r: OCR-Qualität ausreichend, kein Re-OCR nötig",
+            "Dokument %s, Schritt %r: Bild-Original (%s), OCR der PDF-Archivfassung via %s",
             document_id,
             step_config.name,
+            mime_type,
+            ai_config.model,
+        )
+    else:
+        logger.info(
+            "Dokument %s, Schritt %r: Dateityp %r hat eigenen Text, kein OCR nötig",
+            document_id,
+            step_config.name,
+            mime_type or "unbekannt",
         )
         return None
-
-    logger.warning(
-        "Dokument %s, Schritt %r: OCR-Qualität unter Schwelle (%.3f < %.3f), versuche Re-OCR via Docling",
-        document_id,
-        step_config.name,
-        old_score,
-        step_config.quality_threshold,
-    )
 
     fingerprint = _fingerprint(
-        old_text, step_config.docling_base_url or "", str(step_config.docling_force_ocr)
+        hashlib.sha256(pdf_bytes).hexdigest(), ai_config.provider, ai_config.model
     )
     cached = None if force else get_cached_step_result(conn, step_config.name, document_id, fingerprint)
     if cached is not None:
-        new_text = cached["output_value"]
+        new_text = _clean_ocr_text(cached["output_value"])
         logger.info(
-            "Dokument %s, Schritt %r: nutze zwischengespeichertes Docling-Ergebnis",
+            "Dokument %s, Schritt %r: nutze zwischengespeichertes OCR-Ergebnis",
             document_id,
             step_config.name,
         )
-    else:
-        original_bytes = paperless.download_original(document_id)
-        with DoclingClient(base_url=step_config.docling_base_url) as docling:
-            new_text = docling.convert_to_text(
-                f"{document_id}.pdf", original_bytes, force_ocr=step_config.docling_force_ocr
+        if new_text != old_text and field_written_since(
+            conn, document_id, step_config.target_field, cached["created_at"]
+        ):
+            logger.info(
+                "Dokument %s, Schritt %r: OCR-Ergebnis wurde schon übernommen, der Text ist "
+                "seitdem in Paperless geändert worden - wird nicht überschrieben "
+                "(--force erkennt neu und überschreibt)",
+                document_id,
+                step_config.name,
             )
+            return None
+    else:
+        ocr_client = build_ocr_client(ai_config, step_config.ocr_timeout)
+        try:
+            ai_result = ocr_client.ocr_pdf(pdf_bytes, f"{document_id}.pdf")
+        finally:
+            ocr_client.close()
+        cost = _log_usage(document_id, step_config.name, ai_config, ai_result)
         save_step_result(
             conn,
             step_name=step_config.name,
             document_id=document_id,
             fingerprint=fingerprint,
-            output_value=new_text,
-            provider="docling",
-            model=step_config.docling_base_url or "",
+            output_value=ai_result.text,
+            provider=ai_config.provider,
+            model=ai_config.model,
             prompt_name="-",
             prompt_version="-",
+            prompt_tokens=ai_result.prompt_tokens,
+            completion_tokens=ai_result.completion_tokens,
+            estimated_cost_usd=cost,
         )
+        new_text = _clean_ocr_text(ai_result.text)
         logger.info(
-            "Dokument %s, Schritt %r: Docling-Konvertierung abgeschlossen (%d Zeichen)",
+            "Dokument %s, Schritt %r: OCR abgeschlossen (%d Zeichen)",
             document_id,
             step_config.name,
             len(new_text),
         )
 
-    new_score = ocr_quality_score(new_text)
-    logger.info(
-        "Dokument %s, Schritt %r: OCR-Qualitätsscore nach Docling=%.3f (vorher %.3f)",
-        document_id,
-        step_config.name,
-        new_score,
-        old_score,
-    )
-
-    min_acceptable_length = max(step_config.min_chars_for_check, len(old_text) * MIN_OCR_LENGTH_RATIO)
-    if len(new_text.strip()) < min_acceptable_length:
+    if not new_text:
         logger.warning(
-            "Dokument %s, Schritt %r: Docling-Ergebnis deutlich kürzer/leerer als vorhandener Text "
-            "(%d < %d Zeichen), wird NICHT übernommen (Sicherheitscheck)",
+            "Dokument %s, Schritt %r: OCR-Ergebnis ist leer, wird NICHT übernommen",
             document_id,
             step_config.name,
-            len(new_text.strip()),
-            int(min_acceptable_length),
         )
         return None
-
-    old_summary = f"[{len(old_text)} Zeichen, Score {old_score:.2f}]"
-    new_summary = f"[{len(new_text)} Zeichen, Score {new_score:.2f}]"
+    if len(new_text) < len(old_text.strip()) * MIN_OCR_LENGTH_RATIO:
+        logger.warning(
+            "Dokument %s, Schritt %r: OCR-Ergebnis deutlich kürzer als vorhandener Text "
+            "(%d < %d Zeichen, Seite evtl. als Bild statt Text erkannt), wird NICHT übernommen",
+            document_id,
+            step_config.name,
+            len(new_text),
+            len(old_text.strip()),
+        )
+        return None
 
     return _apply_value(
         step_config,
         paperless,
         conn,
         document_id,
-        old_summary,
-        new_summary,
+        _text_summary(old_text),
+        _text_summary(new_text),
         dry_run,
         write_value=new_text,
     )

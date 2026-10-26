@@ -20,10 +20,10 @@ Schritten:
   mehrere Tags haben). Ungültige Einzelvorschläge werden nur einzeln
   verworfen; gültige werden zu den vorhandenen Werten **hinzugefügt**,
   nie entfernt.
-- **OCR-Qualitätsschritt** `ocr_check`: kein KI-Aufruf, sondern eine
-  Heuristik schätzt, ob der vorhandene Text brauchbar ist; falls nicht,
-  wird das Originaldokument über eine lokale Docling-Serve-Instanz neu
-  erkannt.
+- **OCR-Schritt** `ocr`: gescannte Dokumente werden neu erkannt
+  (standardmäßig mit einem lokalen Docling Serve, wahlweise mit dem
+  OCR-Modell LightOnOCR bei Scaleway) und ihr Text in Paperless ersetzt. PDFs, die schon echten Text enthalten, bleiben
+  unangetastet.
 
 Mehrere Schritte lassen sich zu einer **Pipeline** verketten (Reihenfolge
 in `pipeline:` in `config/steps.yaml`); `archivlotse process <id>` ohne
@@ -53,10 +53,12 @@ eine kleine Codeänderung (eine neue Zeile in `CANDIDATE_FETCHERS` in
 - Mindestens ein KI-Backend: Ollama (lokal oder per Netzwerk erreichbar)
   und/oder einen Zugang zu Scaleway Model-as-a-Service (API-Key). Du kannst
   auch beides parallel einrichten und später je nach Aufgabe wählen.
-- Für den `ocr_check`-Schritt (optional): eine erreichbare
-  [Docling Serve](https://github.com/docling-project/docling-serve)-Instanz.
-  Ohne Docling kannst du die anderen Schritte trotzdem normal nutzen –
-  `ocr_check` einfach aus `pipeline:` in `config/steps.yaml` entfernen.
+- Für den `ocr`-Schritt: ein laufendes
+  [Docling Serve](https://github.com/docling-project/docling-serve)
+  (z. B. `docker run -p 5001:5001 quay.io/docling-project/docling-serve`)
+  oder – für LightOnOCR – einen Scaleway-Zugang. Ohne beides kannst du die
+  anderen Schritte trotzdem normal nutzen – `ocr` einfach aus
+  `pipeline:` in `config/steps.yaml` entfernen.
 
 ## 2. Projektordner vorbereiten
 
@@ -218,7 +220,7 @@ das steht ausschließlich hier:
 
 ```yaml
 pipeline:
-  - ocr_check
+  - ocr
   - document_type
   - correspondent
   - document_date
@@ -354,42 +356,57 @@ Unterschiede zum einfachen Auswahl-Schritt:
   beiden Label-Zeilen) werden weiterhin als reine Hinzufügen-Liste
   interpretiert – falls das Modell das Format trotz Anweisung ignoriert.
 
-**OCR-Qualitätsschritt `ocr_check`:** kein `prompt`/`model` nötig, da
-kein KI-Aufruf stattfindet:
+**OCR-Schritt `ocr`:** statt `prompt`/`model` ein `ocr:`-Block mit
+einem OCR-Modell aus `config/ai.yaml`. Zur Wahl stehen:
+
+- `docling` (Standard): ein lokales Docling Serve, in `config/ai.yaml` als
+  Provider mit `type: docling` eingetragen. Kostenlos und schnell (ein paar
+  Sekunden pro Seite), liest die Zeichen sauber, reißt aber Tabellen
+  auseinander – bei einem Kontoauszug stehen Buchung und Betrag dann nicht
+  mehr in einer Zeile.
+- `lightonocr-3-0.8b`: LightOnOCR bei Scaleway. Im Vergleich deutlich
+  besser bei Tabellen, kostet etwa 0,2 Cent pro Seite und braucht bei
+  Scaleway manchmal mehrere Minuten.
+
+Umstellen heißt nur `model:` ändern; einzelne Dokumente lassen sich mit
+`--model lightonocr-3-0.8b` auch ohne Umstellung damit erkennen.
 
 ```yaml
-  ocr_check:
+  ocr:
     source_field: content
-    target_field: content # gleiches Feld: aktualisiert content, falls besser
+    target_field: content
 
-    quality_check: heuristic # bisher einzige Option (ai_judge geplant)
-    quality_threshold: 0.50
-    min_chars_for_check: 200 # kuerzere Texte werden nicht geprueft
-
-    docling:
-      base_url: "http://127.0.0.1:5001"
-      force_ocr: true
+    ocr:
+      model: "docling" # oder "lightonocr-3-0.8b"
+      timeout: 600 # Sekunden, lange Dokumente brauchen eine Weile
 ```
 
-Ablauf: Das vorhandene `content`-Feld wird mit einer Heuristik bewertet
-(Anteil der Wörter, die in einer deutschen Wortfrequenzliten als
-einigermaßen gebräuchlich gelten – siehe `archivlotse/ocr_quality.py`).
-Liegt der Score unter `quality_threshold`, wird das Originaldokument von
-Paperless heruntergeladen, über Docling Serve mit `force_ocr` neu erkannt,
-und das Ergebnis geschrieben – sofern es nicht verdächtig viel kürzer ist
-als der vorhandene Text (einfache Notbremse).
+Ablauf:
 
-**Wichtige Einschränkung, bitte lesen:** Die Heuristik ist bewusst simpel
-und wurde an echten Dokumenten kalibriert, hat aber nachweisliche
-Schwächen: zahlenlastige Dokumente (Kontoauszüge, Formulare) werden
-tendenziell niedriger bewertet als sie es "verdienen", und beim Vergleich
-"alter vs. neuer Text" liefert sie keine verlässliche Aussage, welcher
-Text besser ist (ein fachsprachlich korrekter Text kann einen niedrigeren
-Score bekommen als sein eigenes verrauschtes Original). Deshalb wird der
-Score **nicht** benutzt, um zu entscheiden, ob das Docling-Ergebnis
-übernommen wird – nur, um zu entscheiden, ob überhaupt ein Re-OCR-Versuch
-lohnt. Bei Bedarf `quality_threshold` anpassen oder stichprobenartig mit
-`--dry-run --verbose` nachprüfen.
+1. **Ist es ein Scan?** Das entscheidet ArchivLotse am Aufbau der Datei,
+   nicht an der Qualität des vorhandenen Texts: Ein PDF gilt als Scan,
+   wenn mindestens eine Seite nur ein Bild und keinen sichtbaren Text
+   zeigt. Eine unsichtbare Textebene, wie sie Scanner-Apps oder Paperless
+   selbst über einen Scan legen, zählt nicht als Text. Bild-Originale
+   (JPEG, PNG …) sind immer Scans. PDFs mit echtem Text (z. B. eine
+   heruntergeladene Rechnung), E-Mails usw. werden **nicht** angefasst.
+2. Das PDF (bei Bild-Originalen die PDF-Fassung aus Paperless) geht an
+   Docling bzw. LightOnOCR, das Ergebnis ersetzt den Text in Paperless.
+   Bei LightOnOCR werden Tabellen dabei zu einer Zeile pro Tabellenzeile,
+   Zellen getrennt durch ` | `.
+3. **Notbremse:** Ein leeres Ergebnis oder eines, das kürzer als 30 % des
+   bisherigen Texts ist, wird nicht übernommen. LightOnOCR hält z. B.
+   abfotografierte Kassenbons manchmal für ein Bild und liefert dann nur
+   einen Bruchteil des Texts.
+
+Jedes Dokument wird nur **einmal** erkannt und bezahlt (das Ergebnis wird
+je Datei und Modell zwischengespeichert). Korrigierst du den Text danach
+von Hand in Paperless, überschreibt ein späterer Lauf deine Korrektur
+nicht – nur `--force` erkennt neu und überschreibt.
+
+Kosten: Docling läuft lokal und kostet nichts. Scaleway berechnet für LightOnOCR etwa 1000 Tokens pro Seite zu
+2,20 € je 1 Million, also rund 0,2 Cent pro Seite; die Ausgabe ist
+kostenlos.
 
 **Datums-Schritt `document_date`:** bestimmt das Erstellungsdatum
 (Paperless-Feld `created`) aus dem OCR-Text, mit zwei Prompts:
@@ -529,7 +546,7 @@ archivlotse process 6023 --force  # ganze Pipeline
 ```
 
 `--force` überschreibt **nicht** eigentliche Business-Regeln wie die
-`condition:` eines Schritts oder die OCR-Qualitätsschwelle – die
+`condition:` eines Schritts oder die Scan-Erkennung des OCR-Schritts – die
 entscheiden weiterhin ganz normal, ob ein Schritt überhaupt etwas tut.
 
 ### Zwischenspeicher komplett leeren (`clear-cache`)
@@ -639,7 +656,7 @@ zusätzlich die Umgebungsvariable:
 ARCHIVLOTSE_LOG_LEVEL=DEBUG archivlotse process 6023 --step title --dry-run
 ```
 
-Ist ein Dienst nicht erreichbar (Ollama, Docling, Scaleway, Paperless),
+Ist ein Dienst nicht erreichbar (Ollama, Scaleway, Paperless),
 läuft in eine Zeitüberschreitung oder antwortet mit einem HTTP-Fehler,
 erscheint das als **eine** Fehlerzeile mit der betroffenen URL, z. B.
 `Dienst nicht erreichbar (POST http://127.0.0.1:11434/api/generate): [Errno 111] Connection refused`.
@@ -682,13 +699,15 @@ Fehler (also vermutlich Programmfehler) werden immer mit Stacktrace geloggt.
   eingebaute Validierung: die KI hat etwas vorgeschlagen, das nicht
   exakt einem vorhandenen Dokumenttyp entspricht, und der Vorschlag wurde
   bewusst **nicht** übernommen.
-- `Schritt ... quality_check 'ai_judge' ist noch nicht implementiert` →
-  bisher ist nur `quality_check: heuristic` für `ocr_check` gebaut.
-- Verbindungsfehler zu Docling bei `ocr_check` → `docling.base_url` in
-  `config/steps.yaml` prüfen, erreichbar per
-  `curl http://127.0.0.1:5001/health`. Ohne Docling kannst du `ocr_check`
-  einfach aus `pipeline:` entfernen und die anderen Schritte weiter per
-  `--step` einzeln nutzen.
+- `Schritt ...: quality_check/docling gibt es nicht mehr` → deine
+  `config/steps.yaml` stammt noch aus der Docling-Zeit; den `ocr`-
+  Eintrag wie oben gezeigt auf `ocr: {model: ...}` umstellen und den
+  Docling-Provider (`type: docling`) samt Modell `docling` bzw.
+  `lightonocr-3-0.8b` in `config/ai.yaml` eintragen (siehe
+  `config/ai.example.yaml`).
+- `OCR-Ergebnis ... am Token-Limit abgeschnitten` → das Dokument war für
+  einen einzelnen OCR-Aufruf zu lang; der vorhandene Text bleibt dann
+  unverändert.
 
 ## 9. Tests ausführen (optional, für Entwickler)
 
