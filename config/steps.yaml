@@ -21,6 +21,7 @@ pipeline:
   - correspondent
   - document_date
   - geldbetrag
+  - rechnungsnummer
   - tags
   - title
   - mark_done
@@ -226,6 +227,31 @@ steps:
     postprocessing:
       strip_quotes: true
       max_length: 50
+
+  # Zusatzfeld "Rechnungsnummer" (Text) fuellen - nur bei Rechnungen. Wie
+  # geldbetrag: das Feld muss in Paperless existieren, ein schon gesetzter
+  # Wert wird nie ueberschrieben, KEIN-WERT schreibt nichts. Bei einem
+  # Text-Zusatzfeld wird die Antwort unveraendert uebernommen - die
+  # Qualitaet haengt also allein am Prompt (rechnungsnummer.j2).
+  rechnungsnummer:
+    source_field: content
+    custom_field: Rechnungsnummer
+    condition:
+      document_type: Rechnung
+
+    prompt: rechnungsnummer.j2
+    model: "mistral-small-3.2-24b-instruct-2506"
+
+    overwrite_existing: false
+
+    preprocessing:
+      max_input_chars: 8000
+
+    postprocessing:
+      strip_quotes: true
+      # Paperless erlaubt in Text-Zusatzfeldern hoechstens 128 Zeichen;
+      # eine echte Rechnungsnummer ist ohnehin deutlich kuerzer.
+      max_length: 64
 
   title:
     # Paperless-Feld, das als Eingabetext fuer den Prompt gelesen wird.

@@ -3,7 +3,7 @@ from __future__ import annotations
 import httpx
 
 from ..errors import ServiceError
-from .base import AIResult
+from .base import CHECK_TIMEOUT, AIResult
 
 
 def _format_errors(errors: list[dict] | None) -> str:
@@ -27,6 +27,10 @@ class DoclingClient:
 
     def __init__(self, base_url: str, timeout: float = 600.0):
         self._client = httpx.Client(base_url=base_url, timeout=timeout)
+
+    def check(self) -> None:
+        """Raise unless the Docling Serve instance is up."""
+        self._client.get("/health", timeout=CHECK_TIMEOUT).raise_for_status()
 
     def ocr_pdf(self, pdf_bytes: bytes, filename: str) -> AIResult:
         response = self._client.post(

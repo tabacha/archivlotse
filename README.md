@@ -225,6 +225,7 @@ pipeline:
   - correspondent
   - document_date
   - geldbetrag
+  - rechnungsnummer
   - tags
   - title
   - mark_done
@@ -461,8 +462,11 @@ KI-Aufruf übersprungen.
     overwrite_existing: false
 ```
 
-Für ein weiteres Zusatzfeld (z. B. `Rechnungsnummer`) reicht ein neuer
-Prompt plus ein solcher Eintrag in `steps:`/`pipeline:`.
+Für ein weiteres Zusatzfeld reicht ein neuer Prompt plus ein solcher
+Eintrag in `steps:`/`pipeline:` – so funktioniert auch der Schritt
+`rechnungsnummer` (Text-Zusatzfeld `Rechnungsnummer`, nur bei Rechnungen,
+Prompt `rechnungsnummer.j2`). Bei einem Text-Feld wird die Antwort
+unverändert übernommen.
 
 **Tag-Setz-Schritt `mark_done`:** ebenfalls ohne KI – hängt feste,
 **in Paperless bereits vorhandene** Tags an das Dokument an (vorhandene
@@ -579,16 +583,36 @@ jobs:
       tags: [TODO]                    # muss ALLE diese Tags tragen
       exclude_tags: [archivlotse-done] # darf KEINEN dieser Tags tragen
 
-  # Titel wie 20260928_124530 (Scanner-Dateiname): nur neuen Titel berechnen
+  # Titel wie 20260928_124530 oder 20240201scan164151 (automatischer
+  # Dateiname): nur neuen Titel berechnen
   scan_titles:
     filter:
-      title_regex: '^\d{4}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])_\d+$'
+      title_regex:                    # eine Regex oder Liste (eine muss passen)
+        - '^\d{4}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])_\d+(_\d+)?$'
+        - '^\d{4}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])scan\d+$'
     steps: [title]                    # optional, Standard: ganze pipeline:
     # limit: 50                       # optional: höchstens so viele pro Lauf
+
+  # Rechnungen ohne Geldbetrag: OCR (nur Scans) + Betrag bestimmen
+  rechnungen_ohne_geldbetrag:
+    filter:
+      document_types: [Rechnung]      # Dokumenttyp muss EINER dieser sein
+      missing_custom_fields: [Geldbetrag] # diese Zusatzfelder müssen ALLE leer sein
+    steps: [ocr, geldbetrag]
+
+  # Rechnungen mit Geldbetrag, aber ohne Rechnungsnummer
+  rechnungsnummer:
+    filter:
+      document_types: [Rechnung]
+      filled_custom_fields: [Geldbetrag]      # diese müssen ALLE einen Wert haben
+      missing_custom_fields: [Rechnungsnummer]
+    steps: [rechnungsnummer]
 ```
 
-Jeder Job braucht mindestens `tags` oder `title_regex` (damit nicht aus
-Versehen das ganze Archiv verarbeitet wird). Die Regex in einfache
+Jeder Job braucht mindestens `tags`, `title_regex` oder `document_types`
+(damit nicht aus Versehen das ganze Archiv verarbeitet wird). Ein
+Dokumenttyp oder Zusatzfeld, den/das es in Paperless nicht gibt, ist ein
+Fehler. Die Regex in einfache
 Anführungszeichen setzen, sonst verändert YAML die Backslashes. Ein Tag in
 `exclude_tags`, den es in Paperless noch nicht gibt, schließt einfach
 nichts aus (mit Warnung im Log); ein Tag in `tags`, den es nicht gibt,
@@ -608,6 +632,74 @@ Scheitert die Verarbeitung eines einzelnen Dokuments, wird das geloggt und
 mit dem nächsten weitergemacht. ArchivLotse setzt oder entfernt dabei
 selbst **keine** Tags (auch kein `archivlotse-done`) – ob und wie du
 erledigte Dokumente kennzeichnest, bleibt dir überlassen.
+
+### Server-Modus: Webhook und Zeitplan (`serve`), z. B. im Docker-Container
+
+`archivlotse serve` läuft dauerhaft und macht zweierlei:
+
+- **Zeitplan:** Batch-Jobs mit einem `cron:`-Feld in `config/batch.yaml`
+  startet der Server selbst (cron-Syntax, lokale Zeit, z. B.
+  `cron: "0 * * * *"` = stündlich, `"0 3 * * *"` = täglich 3:00,
+  `@daily`). Jobs ohne `cron:` laufen nur per `archivlotse batch`.
+  Änderungen an `cron:` wirken erst nach einem Neustart.
+- **Webhook:** `POST /process` verarbeitet ein Dokument – mit der ganzen
+  Pipeline oder nur bestimmten Schritten. Die Antwort kommt sofort
+  (`202`), verarbeitet wird im Hintergrund.
+
+Alles läuft strikt nacheinander in einer Warteschlange (Webhooks und
+Cron-Jobs gemeinsam), derselbe Auftrag wird nicht doppelt eingereiht.
+Die Warteschlange liegt nur im Speicher – was beim Beenden noch wartet,
+ist verloren; ein Cron-Job wie `todo` (Tag `TODO`, ohne
+`archivlotse-done`) fängt solche Dokumente später wieder auf. Vor jedem
+Webhook-Dokument werden die benötigten Dienste geprüft; ist einer nicht
+erreichbar, wird das Dokument übersprungen (Log), nicht halb verarbeitet.
+
+Jeder Webhook-Aufruf braucht den geheimen Token aus
+`ARCHIVLOTSE_WEBHOOK_TOKEN` (ohne Token startet der Server nicht), als
+Header `Authorization: Bearer <token>` oder `X-Archivlotse-Token: <token>`.
+Parameter als JSON-Body, Formular-Daten oder in der URL:
+
+| Parameter | Bedeutung |
+|---|---|
+| `document_id` (oder `doc_id`, `id`) | Paperless-Dokument-ID |
+| `doc_url` | alternativ: Dokument-URL, die ID wird aus `/documents/<id>/` gelesen |
+| `steps` (oder `step`) | Liste oder kommagetrennt, z. B. `ocr,title`; ohne = ganze `pipeline:` |
+| `dry_run` | `true` = nichts schreiben (ein Server mit `--dry-run` schreibt nie) |
+| `force` | `true` = Caches ignorieren |
+
+```bash
+curl -X POST http://localhost:8080/process \
+  -H "Authorization: Bearer $ARCHIVLOTSE_WEBHOOK_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"document_id": 6023, "steps": ["title"], "dry_run": true}'
+curl http://localhost:8080/health      # {"status": "ok", "queued": 0, "running": null}
+```
+
+**In Paperless** (Workflows): Auslöser „Dokument hinzugefügt", Aktion
+„Webhook", URL `http://<archivlotse-host>:8080/process`, „Parameter
+verwenden" an, Parameter `doc_url` = Platzhalter für die Dokument-URL
+(je nach Paperless-Version `{doc_url}` bzw. `{{ doc_url }}`), optional
+`steps`; Header `{"Authorization": "Bearer <token>"}`.
+
+**Docker:** `Dockerfile` und `docker-compose.yml` liegen im Projekt. Der
+Container startet `archivlotse serve`, bindet `./config` (nur lesend, inkl.
+`paperless.yaml`/`ai.yaml`/Prompts) und `./data` (SQLite, muss für UID
+1000 beschreibbar sein) ein und bringt ein eigenes Docling Serve mit:
+
+```bash
+cp .env.example .env          # ARCHIVLOTSE_WEBHOOK_TOKEN, PAPERLESS_TOKEN, ... eintragen
+docker compose up -d --build
+docker compose logs -f archivlotse
+docker compose run --rm archivlotse process 6023 --dry-run   # Einzelbefehle gehen auch
+```
+
+Im Container ist `127.0.0.1` der Container selbst: in `config/ai.yaml`
+für Docling `base_url: "http://docling:5001"` eintragen, und Paperless
+über eine vom Container erreichbare Adresse ansprechen. Die Zeitzone für
+`cron:` kommt aus `TZ` (Standard `Europe/Berlin`).
+
+Ohne Docker: `ARCHIVLOTSE_WEBHOOK_TOKEN=... archivlotse serve`
+(Optionen: `--host`, `--port`, `--dry-run`, `--verbose`).
 
 ## 6. Wo landen die Daten?
 
@@ -665,6 +757,14 @@ Fehler (also vermutlich Programmfehler) werden immer mit Stacktrace geloggt.
 
 ## 8. Typische Fehler
 
+- `Abbruch: Start verweigert, benötigte Dienste fehlen - ...` → vor jedem
+  `process` und `batch` (auch mit `--dry-run`) prüft ArchivLotse Paperless und
+  alle Dienste, die die laufenden Schritte laut `config/steps.yaml` benutzen
+  (z. B. Docling, Scaleway, Ollama), und ob das Modell dort verfügbar ist. Die
+  Meldung nennt jedes Problem; es wird noch nichts verarbeitet. Das gilt auch,
+  wenn ein Dokument den Dienst gar nicht bräuchte (Docling ist für den Schritt
+  `ocr` nötig, selbst wenn das PDF kein Scan ist). Geht es ohne den Dienst,
+  einzelne Schritte mit `--step` oder einem Batch-Job mit `steps:` ausführen.
 - `FileNotFoundError: config/paperless.yaml` → Schritt 3 noch nicht
   durchgeführt (Dateien kopieren und ausfüllen).
 - `401 Unauthorized` von Paperless → Token in `config/paperless.yaml`

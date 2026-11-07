@@ -1,0 +1,15 @@
+.git
+.venv
+venv
+data
+tests
+doc
+**/__pycache__
+*.pyc
+*.egg-info
+.pytest_cache
+.claude
+**/*~
+.env
+config/paperless.yaml
+config/ai.yaml

@@ -7,10 +7,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import load_paperless_config, load_yaml
+from .cron import CronSchedule
 from .db import init_db
 from .errors import log_failure
 from .paperless import PaperlessClient
 from .pipeline import _get_candidates, process_pipeline
+from .preflight import check_services
 from .steps import load_pipeline_order, load_step_config
 
 logger = logging.getLogger(__name__)
@@ -23,22 +25,39 @@ class BatchJob:
     tags: list[str] = field(default_factory=list)
     # Dokument darf KEINEN dieser Tags tragen (per Name).
     exclude_tags: list[str] = field(default_factory=list)
-    # Dokumenttitel muss auf diesen regulaeren Ausdruck passen (re.search,
-    # also ^...$ fuer einen Treffer auf den ganzen Titel selbst angeben).
-    title_regex: re.Pattern | None = None
+    # Dokumenttitel muss auf MINDESTENS EINEN dieser regulaeren Ausdruecke
+    # passen (re.search, also ^...$ fuer einen Treffer auf den ganzen Titel
+    # selbst angeben). Leer = kein Titel-Kriterium.
+    title_regex: list[re.Pattern] = field(default_factory=list)
+    # Dokumenttyp muss EINER dieser sein (per Name).
+    document_types: list[str] = field(default_factory=list)
+    # Diese Zusatzfelder (per Name) muessen ALLE leer sein: nicht am
+    # Dokument, oder ohne Wert.
+    missing_custom_fields: list[str] = field(default_factory=list)
+    # Diese Zusatzfelder (per Name) muessen ALLE einen Wert haben.
+    filled_custom_fields: list[str] = field(default_factory=list)
     # Nur diese Schritte (aus config/steps.yaml) statt der ganzen pipeline:.
     steps: list[str] | None = None
     limit: int | None = None
+    # Nur fuer "archivlotse serve": wann der Job automatisch laeuft.
+    # "archivlotse batch" ignoriert das Feld.
+    cron: CronSchedule | None = None
 
 
 def load_batch_jobs(path: str | Path = "config/batch.yaml") -> list[BatchJob]:
     """Load all batch jobs from config/batch.yaml, in file order.
 
     Each job selects documents by tag names (`filter.tags`: all required,
-    `filter.exclude_tags`: none allowed) and/or a title regex
-    (`filter.title_regex`), and optionally restricts which steps run
+    `filter.exclude_tags`: none allowed), title regexes
+    (`filter.title_regex`: one string or a list, any may match) and/or
+    document types (`filter.document_types`: any may match), optionally
+    narrowed to documents whose named custom fields are all empty
+    (`filter.missing_custom_fields`) and/or all filled
+    (`filter.filled_custom_fields`), and
+    optionally restricts which steps run
     (`steps:`, default: the whole `pipeline:` from config/steps.yaml) and
-    how many documents are processed (`limit:`). A job without any filter
+    how many documents are processed (`limit:`), and when `archivlotse
+    serve` runs it on its own (`cron:`, a 5-field cron expression). A job without any filter
     criterion is rejected rather than silently matching the whole archive.
     """
     data = load_yaml(path)
@@ -50,97 +69,175 @@ def load_batch_jobs(path: str | Path = "config/batch.yaml") -> list[BatchJob]:
     for name, job in jobs_data.items():
         job = job or {}
         job_filter = job.get("filter") or {}
-        unknown = set(job_filter) - {"tags", "exclude_tags", "title_regex"}
+        allowed = {
+            "tags",
+            "exclude_tags",
+            "title_regex",
+            "document_types",
+            "missing_custom_fields",
+            "filled_custom_fields",
+        }
+        unknown = set(job_filter) - allowed
         if unknown:
             raise ValueError(
                 f"Batch-Job {name!r}: unbekannte Filter-Kriterien {sorted(unknown)} "
-                "(erlaubt: tags, exclude_tags, title_regex)"
+                f"(erlaubt: {', '.join(sorted(allowed))})"
             )
-        title_regex = job_filter.get("title_regex")
+        title_regex = job_filter.get("title_regex") or []
+        patterns = [title_regex] if isinstance(title_regex, str) else title_regex
         try:
-            compiled = re.compile(title_regex) if title_regex else None
-        except re.error as exc:
+            compiled = [re.compile(pattern) for pattern in patterns if pattern]
+        except (re.error, TypeError) as exc:
             raise ValueError(f"Batch-Job {name!r}: ungültige title_regex {title_regex!r}: {exc}") from exc
+        try:
+            cron = CronSchedule.parse(job["cron"]) if job.get("cron") else None
+        except ValueError as exc:
+            raise ValueError(f"Batch-Job {name!r}: {exc}") from exc
 
         batch_job = BatchJob(
             name=name,
             tags=list(job_filter.get("tags") or []),
             exclude_tags=list(job_filter.get("exclude_tags") or []),
             title_regex=compiled,
+            document_types=_as_list(job_filter.get("document_types")),
+            missing_custom_fields=_as_list(job_filter.get("missing_custom_fields")),
+            filled_custom_fields=_as_list(job_filter.get("filled_custom_fields")),
             steps=list(job["steps"]) if job.get("steps") else None,
             limit=job.get("limit"),
+            cron=cron,
         )
-        if not batch_job.tags and not batch_job.title_regex:
+        if not batch_job.tags and not batch_job.title_regex and not batch_job.document_types:
             raise ValueError(
-                f"Batch-Job {name!r}: braucht mindestens 'filter.tags' oder 'filter.title_regex' "
-                "(ein Job ohne positives Kriterium würde das ganze Archiv verarbeiten)"
+                f"Batch-Job {name!r}: braucht mindestens 'filter.tags', 'filter.title_regex' oder "
+                "'filter.document_types' (ein Job ohne positives Kriterium würde das ganze "
+                "Archiv verarbeiten)"
             )
         jobs.append(batch_job)
     return jobs
 
 
-def _tag_ids_by_name(tags: list[dict]) -> dict[str, int]:
-    return {tag["name"].strip().casefold(): tag["id"] for tag in tags}
+def _as_list(value) -> list[str]:
+    if not value:
+        return []
+    return [value] if isinstance(value, str) else list(value)
 
 
-def _resolve_job_tags(job: BatchJob, tags: list[dict]) -> tuple[set[int], set[int]]:
-    """Resolve the job's tag names to Paperless ids. A required tag that
-    doesn't exist is an error (the job could never match anything, most
-    likely a typo); an excluded tag that doesn't exist (yet) simply
-    excludes nothing - e.g. a "done" marker tag nobody has created so far."""
-    ids = _tag_ids_by_name(tags)
-    required: set[int] = set()
-    for name in job.tags:
-        tag_id = ids.get(name.strip().casefold())
-        if tag_id is None:
-            available = ", ".join(sorted(tag["name"] for tag in tags)) or "(keine)"
+def _ids_by_name(items: list[dict]) -> dict[str, int]:
+    return {item["name"].strip().casefold(): item["id"] for item in items}
+
+
+def _resolve_required(job: BatchJob, names: list[str], items: list[dict], kind: str) -> set[int]:
+    """Names that must exist in Paperless - an unknown one means the job
+    could never match (most likely a typo), so it's an error."""
+    ids = _ids_by_name(items)
+    resolved: set[int] = set()
+    for name in names:
+        item_id = ids.get(name.strip().casefold())
+        if item_id is None:
+            available = ", ".join(sorted(item["name"] for item in items)) or "(keine)"
             raise ValueError(
-                f"Batch-Job {job.name!r}: Tag {name!r} existiert nicht in Paperless. "
+                f"Batch-Job {job.name!r}: {kind} {name!r} existiert nicht in Paperless. "
                 f"Vorhanden: {available}"
             )
-        required.add(tag_id)
-    excluded: set[int] = set()
-    for name in job.exclude_tags:
-        tag_id = ids.get(name.strip().casefold())
-        if tag_id is None:
-            logger.warning(
-                "Batch-Job %r: auszuschließender Tag %r existiert nicht in Paperless - "
-                "schließt daher nichts aus",
-                job.name,
-                name,
-            )
-            continue
-        excluded.add(tag_id)
-    return required, excluded
+        resolved.add(item_id)
+    return resolved
 
 
-def _matches(job: BatchJob, document: dict, required: set[int], excluded: set[int]) -> bool:
+@dataclass
+class ResolvedFilter:
+    """A job's filter with all names resolved to Paperless ids."""
+
+    required_tags: set[int] = field(default_factory=set)
+    excluded_tags: set[int] = field(default_factory=set)
+    document_types: set[int] = field(default_factory=set)
+    missing_custom_fields: set[int] = field(default_factory=set)
+    filled_custom_fields: set[int] = field(default_factory=set)
+
+
+def _resolve_filter(
+    job: BatchJob, paperless: PaperlessClient, conn: sqlite3.Connection, force: bool = False
+) -> ResolvedFilter:
+    """Resolve the job's names to Paperless ids. Required tags, document
+    types and custom fields must exist; an excluded tag that doesn't exist
+    (yet) simply excludes nothing - e.g. a "done" marker tag nobody has
+    created so far. Candidate lists are only fetched if the job uses them."""
+    resolved = ResolvedFilter()
+    if job.tags or job.exclude_tags:
+        tags = _get_candidates(conn, paperless, "tags", force)
+        resolved.required_tags = _resolve_required(job, job.tags, tags, "Tag")
+        ids = _ids_by_name(tags)
+        for name in job.exclude_tags:
+            tag_id = ids.get(name.strip().casefold())
+            if tag_id is None:
+                logger.warning(
+                    "Batch-Job %r: auszuschließender Tag %r existiert nicht in Paperless - "
+                    "schließt daher nichts aus",
+                    job.name,
+                    name,
+                )
+                continue
+            resolved.excluded_tags.add(tag_id)
+    if job.document_types:
+        resolved.document_types = _resolve_required(
+            job, job.document_types, _get_candidates(conn, paperless, "document_types", force), "Dokumenttyp"
+        )
+    if job.missing_custom_fields or job.filled_custom_fields:
+        custom_fields = _get_candidates(conn, paperless, "custom_fields", force)
+        resolved.missing_custom_fields = _resolve_required(
+            job, job.missing_custom_fields, custom_fields, "Zusatzfeld"
+        )
+        resolved.filled_custom_fields = _resolve_required(
+            job, job.filled_custom_fields, custom_fields, "Zusatzfeld"
+        )
+    return resolved
+
+
+def _matches(job: BatchJob, document: dict, resolved: ResolvedFilter) -> bool:
     document_tags = set(document.get("tags") or [])
-    if not required <= document_tags:
+    if not resolved.required_tags <= document_tags:
         return False
-    if document_tags & excluded:
+    if document_tags & resolved.excluded_tags:
         return False
-    if job.title_regex is not None and not job.title_regex.search(document.get("title") or ""):
+    if resolved.document_types and document.get("document_type") not in resolved.document_types:
+        return False
+    if resolved.missing_custom_fields or resolved.filled_custom_fields:
+        filled = {
+            entry.get("field")
+            for entry in document.get("custom_fields") or []
+            if entry.get("value") not in (None, "")
+        }
+        if filled & resolved.missing_custom_fields:
+            return False
+        if not resolved.filled_custom_fields <= filled:
+            return False
+    title = document.get("title") or ""
+    if job.title_regex and not any(pattern.search(title) for pattern in job.title_regex):
         return False
     return True
 
 
 def select_documents(
     job: BatchJob, paperless: PaperlessClient, conn: sqlite3.Connection, force: bool = False
-) -> tuple[list[int], set[int], set[int]]:
+) -> tuple[list[int], ResolvedFilter]:
     """Return the ids (ascending) of all documents matching the job's
-    filter, plus the resolved required/excluded tag ids for re-checking.
+    filter, plus the resolved filter for re-checking.
 
-    Tag criteria are passed to Paperless as query filters; the title
-    regex is applied locally, since Paperless's API has no regex filter.
+    Tag and document-type criteria are passed to Paperless as query
+    filters; the title regex and the custom-field checks are applied
+    locally (Paperless's API has no regex filter, and "field missing or
+    without value" is simpler to check reliably here than in its
+    version-dependent custom_field_query syntax).
     """
-    tags = _get_candidates(conn, paperless, "tags", force)
-    required, excluded = _resolve_job_tags(job, tags)
-    documents = paperless.list_documents(tags_all=sorted(required), tags_none=sorted(excluded))
-    document_ids = sorted(
-        document["id"] for document in documents if _matches(job, document, required, excluded)
+    resolved = _resolve_filter(job, paperless, conn, force)
+    documents = paperless.list_documents(
+        tags_all=sorted(resolved.required_tags),
+        tags_none=sorted(resolved.excluded_tags),
+        document_types=sorted(resolved.document_types),
     )
-    return document_ids, required, excluded
+    document_ids = sorted(
+        document["id"] for document in documents if _matches(job, document, resolved)
+    )
+    return document_ids, resolved
 
 
 def process_batch(
@@ -159,7 +256,9 @@ def process_batch(
     smallest document id first.
 
     All job and step names are validated before anything is processed,
-    so a typo in batch.yaml fails up front, not halfway through.
+    so a typo in batch.yaml fails up front, not halfway through. Likewise,
+    nothing starts unless every service those steps need is reachable
+    (see check_services).
 
     Immediately before processing each document, it is re-fetched fresh
     and re-checked against the job's filter - the document list was
@@ -184,9 +283,17 @@ def process_batch(
                 f"Verfügbar: {', '.join(by_name)}"
             )
         jobs = [by_name[name] for name in job_names]
+    step_names: dict[str, None] = {}
     for job in jobs:
         for step_name in job.steps or load_pipeline_order(steps_config_path):
             load_step_config(step_name, steps_config_path)
+            step_names[step_name] = None
+    check_services(
+        list(step_names),
+        paperless_config_path=paperless_config_path,
+        ai_config_path=ai_config_path,
+        steps_config_path=steps_config_path,
+    )
 
     paperless_config = load_paperless_config(paperless_config_path)
     conn = init_db(db_path)
@@ -194,7 +301,7 @@ def process_batch(
 
     with PaperlessClient(paperless_config) as paperless:
         for job in jobs:
-            document_ids, required, excluded = select_documents(job, paperless, conn, force)
+            document_ids, resolved = select_documents(job, paperless, conn, force)
             job_limit = limit if limit is not None else job.limit
             total_matches = len(document_ids)
             if job_limit is not None:
@@ -213,7 +320,7 @@ def process_batch(
                     "Batch-Job %r: Dokument %s (%d/%d)", job.name, document_id, index, len(document_ids)
                 )
                 try:
-                    if not _matches(job, paperless.get_document(document_id), required, excluded):
+                    if not _matches(job, paperless.get_document(document_id), resolved):
                         logger.info(
                             "Batch-Job %r: Dokument %s passt inzwischen nicht mehr zum Filter - "
                             "übersprungen",

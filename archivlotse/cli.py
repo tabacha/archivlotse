@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 
 import httpx
@@ -10,6 +11,9 @@ from .batch import process_batch
 from .errors import ServiceError, describe_expected_error
 from .logging_config import setup_logging
 from .pipeline import clear_cache, process_pipeline, process_step
+from .preflight import check_services
+from .server import ServerSettings, serve
+from .steps import load_pipeline_order
 
 
 logger = logging.getLogger("archivlotse.cli")
@@ -92,6 +96,42 @@ def main(argv: list[str] | None = None) -> int:
     batch_parser.add_argument("--steps-config", default="config/steps.yaml")
     batch_parser.add_argument("--db", default="data/archivlotse.db")
 
+    serve_parser = subparsers.add_parser(
+        "serve",
+        help="Server-Modus: Webhook (POST /process) für einzelne Dokumente und Batch-Jobs "
+        "mit 'cron:' aus config/batch.yaml nach Zeitplan",
+    )
+    serve_parser.add_argument(
+        "--host",
+        default=os.environ.get("ARCHIVLOTSE_HOST", "0.0.0.0"),
+        help="Adresse, auf der gelauscht wird (Standard: $ARCHIVLOTSE_HOST oder 0.0.0.0)",
+    )
+    serve_parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("ARCHIVLOTSE_PORT", "8080")),
+        help="Port (Standard: $ARCHIVLOTSE_PORT oder 8080)",
+    )
+    serve_parser.add_argument(
+        "--webhook-token",
+        default=os.environ.get("ARCHIVLOTSE_WEBHOOK_TOKEN", ""),
+        help="Geheimer Token, den jeder Webhook-Aufruf mitschicken muss (Standard: "
+        "$ARCHIVLOTSE_WEBHOOK_TOKEN - besser per Umgebungsvariable als auf der Kommandozeile)",
+    )
+    serve_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Alles nur berechnen, nie in Paperless schreiben (Webhooks und Cron-Jobs)",
+    )
+    serve_parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Ausführliches Logging (inkl. Prompts)"
+    )
+    serve_parser.add_argument("--batch-config", default="config/batch.yaml")
+    serve_parser.add_argument("--paperless-config", default="config/paperless.yaml")
+    serve_parser.add_argument("--ai-config", default="config/ai.yaml")
+    serve_parser.add_argument("--steps-config", default="config/steps.yaml")
+    serve_parser.add_argument("--db", default="data/archivlotse.db")
+
     clear_cache_parser = subparsers.add_parser(
         "clear-cache",
         help="Zwischengespeicherte KI-Ergebnisse und Kandidatenlisten komplett löschen "
@@ -113,6 +153,20 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "clear-cache":
             clear_cache(db_path=args.db)
+        elif args.command == "serve":
+            serve(
+                ServerSettings(
+                    webhook_token=args.webhook_token,
+                    host=args.host,
+                    port=args.port,
+                    dry_run=args.dry_run,
+                    batch_config_path=args.batch_config,
+                    paperless_config_path=args.paperless_config,
+                    ai_config_path=args.ai_config,
+                    steps_config_path=args.steps_config,
+                    db_path=args.db,
+                )
+            )
         elif args.command == "batch":
             process_batch(
                 job_names=args.jobs or None,
@@ -128,6 +182,14 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "process":
             if args.model is not None and args.step is None:
                 parser.error("--model kann nur zusammen mit --step benutzt werden")
+
+            check_services(
+                [args.step] if args.step else load_pipeline_order(args.steps_config),
+                model=args.model,
+                paperless_config_path=args.paperless_config,
+                ai_config_path=args.ai_config,
+                steps_config_path=args.steps_config,
+            )
 
             if args.step is None:
                 process_pipeline(

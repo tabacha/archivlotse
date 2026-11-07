@@ -5,7 +5,7 @@ import base64
 import httpx
 
 from ..errors import ServiceError
-from .base import TEMPERATURE, AIResult
+from .base import CHECK_TIMEOUT, TEMPERATURE, AIResult
 
 
 class OpenAICompatibleClient:
@@ -23,6 +23,15 @@ class OpenAICompatibleClient:
             headers={"Authorization": f"Bearer {secret_key}"},
             timeout=timeout,
         )
+
+    def check(self) -> None:
+        """Raise unless the API is up, accepts the key and offers this
+        model. The model list is free - no completion is requested."""
+        response = self._client.get("/models", timeout=CHECK_TIMEOUT)
+        response.raise_for_status()
+        ids = {entry.get("id") for entry in response.json().get("data") or []}
+        if self._model not in ids:
+            raise ServiceError(f"Der Provider bietet das Modell {self._model!r} nicht an")
 
     def generate(self, prompt: str) -> AIResult:
         response = self._client.post(

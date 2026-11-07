@@ -1,0 +1,40 @@
+# ArchivLotse im Server-Modus (archivlotse serve): Webhook fuer einzelne
+# Dokumente + Batch-Jobs mit cron: aus config/batch.yaml.
+#
+#   cp .env.example .env     # Tokens eintragen
+#   docker compose up -d --build
+#   docker compose logs -f archivlotse
+#
+# Einmalige Befehle im selben Container-Setup:
+#   docker compose run --rm archivlotse process 6023 --dry-run
+#   docker compose run --rm archivlotse batch todo --limit 10
+
+services:
+  archivlotse:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # cron:-Zeitplaene gelten in dieser Zeitzone.
+      TZ: ${TZ:-Europe/Berlin}
+      # Im Container immer 8080; ARCHIVLOTSE_PORT aus .env aendert nur den
+      # Port auf dem Host (ports: unten).
+      ARCHIVLOTSE_PORT: "8080"
+    ports:
+      - "${ARCHIVLOTSE_PORT:-8080}:8080"
+    volumes:
+      # Konfiguration inkl. paperless.yaml/ai.yaml und Prompts (nur lesend).
+      - ./config:/app/config:ro
+      # SQLite-Datenbank (Cache + Audit-Log), bleibt ueber Neustarts erhalten.
+      # Muss fuer UID 1000 beschreibbar sein.
+      - ./data:/app/data
+    depends_on:
+      - docling
+
+  # Lokales Docling Serve fuer den OCR-Schritt. In config/ai.yaml dafuer
+  # base_url: "http://docling:5001" eintragen (127.0.0.1 ist im Container
+  # der Container selbst). Wer kein Docling braucht (ocr.model auf
+  # Scaleway), kann den Dienst und depends_on oben entfernen.
+  docling:
+    image: quay.io/docling-project/docling-serve
+    restart: unless-stopped

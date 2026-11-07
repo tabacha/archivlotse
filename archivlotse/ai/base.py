@@ -9,6 +9,10 @@ from dataclasses import dataclass
 # amount flip between runs.
 TEMPERATURE = 0.0
 
+# Timeout (seconds) for the reachability check before a run. Deliberately much
+# shorter than a provider's AI timeout: nothing is being computed here.
+CHECK_TIMEOUT = 10.0
+
 
 @dataclass
 class AIResult:

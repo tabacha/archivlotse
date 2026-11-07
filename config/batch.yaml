@@ -8,13 +8,25 @@
 #     tags:         Dokument muss ALLE diese Tags tragen
 #     exclude_tags: Dokument darf KEINEN dieser Tags tragen (ein Tag, den es
 #                   in Paperless (noch) nicht gibt, schliesst nichts aus)
-#     title_regex:  Titel muss auf diesen regulaeren Ausdruck passen
+#     title_regex:  Titel muss auf diesen regulaeren Ausdruck passen, oder
+#                   bei einer Liste auf mindestens einen davon
 #                   (Python-Syntax; in einfachen Anfuehrungszeichen, damit
 #                   YAML die Backslashes nicht umdeutet)
-#     Mindestens "tags" oder "title_regex" ist Pflicht.
+#     document_types: Dokumenttyp muss EINER dieser sein (per Name)
+#     missing_custom_fields: diese Zusatzfelder muessen ALLE leer sein
+#                   (nicht am Dokument oder ohne Wert)
+#     filled_custom_fields: diese Zusatzfelder muessen ALLE einen Wert haben
+#     Mindestens "tags", "title_regex" oder "document_types" ist Pflicht.
 #   steps:  nur diese Schritte (Standard: die ganze pipeline: aus steps.yaml)
 #   limit:  hoechstens so viele Dokumente pro Lauf (kleinste ID zuerst;
 #           "--limit" auf der Kommandozeile hat Vorrang)
+#   cron:   nur fuer "archivlotse serve": Zeitplan, nach dem der Server den
+#           Job selbst startet - cron-Syntax "Minute Stunde Tag Monat
+#           Wochentag" in lokaler Zeit (TZ), z.B. "0 3 * * *" (taeglich
+#           3:00), "*/30 * * * *" (alle 30 Minuten), "0 6 * * 1-5"
+#           (werktags 6:00) oder @hourly/@daily/@weekly. Ohne cron: laeuft
+#           der Job nur per "archivlotse batch"; der ignoriert cron: ganz.
+#           Aenderungen an cron: wirken erst nach Neustart des Servers.
 #
 # Unmittelbar vor jedem Dokument wird der Filter erneut geprueft - ein
 # Dokument, das inzwischen nicht mehr passt (z.B. Titel schon von einem
@@ -28,13 +40,44 @@ jobs:
     filter:
       tags: [TODO]
       exclude_tags: [archivlotse-done]
+    # Im Server-Modus stuendlich - faengt auch Dokumente auf, deren Webhook
+    # verloren ging oder bei denen ein Schritt fehlschlug.
+    cron: "0 * * * *"
 
-  # Dokumente, die noch den automatisch vergebenen Scanner-Dateinamen als
-  # Titel tragen (<Jahr><Monat><Tag>_<Zahl>_<Zahl>, z.B. 20260928_124530_0001), bekommen
-  # einen berechneten Titel.
+  # Dokumente, die noch einen automatisch vergebenen Dateinamen als Titel
+  # tragen, bekommen einen berechneten Titel.
   scan_titles:
     filter:
-      title_regex: '^\d{4}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])_\d+_\d+$'
+      title_regex:
+        # 20240621_162028, 20260928_124530_0001
+        - '^\d{4}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])_\d+(_\d+)?$'
+        # 20240615_091018_document_14
+        - '^\d{4}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])_\d+_document_\d+$'
+        # 20240201scan164151
+        - '^\d{4}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])scan\d+$'
     steps:
       - ocr
       - title
+
+  # Rechnungen, bei denen der Geldbetrag noch fehlt: Scans zuerst per OCR
+  # (born-digital PDFs ueberspringt der Schritt ohnehin), dann den Betrag
+  # bestimmen. Ein schon gesetzter Betrag wird nie ueberschrieben.
+  rechnungen_ohne_geldbetrag:
+    filter:
+      document_types: [Rechnung]
+      missing_custom_fields: [Geldbetrag]
+    steps:
+      - ocr
+      - geldbetrag
+
+  # Rechnungen, die schon einen Geldbetrag, aber noch keine Rechnungsnummer
+  # haben: nur die Rechnungsnummer bestimmen (OCR ist bei ihnen durch den
+  # Geldbetrag-Lauf in aller Regel schon erledigt). Eine schon gesetzte
+  # Rechnungsnummer wird nie ueberschrieben.
+  rechnungsnummer:
+    filter:
+      document_types: [Rechnung]
+      filled_custom_fields: [Geldbetrag]
+      missing_custom_fields: [Rechnungsnummer]
+    steps:
+      - rechnungsnummer

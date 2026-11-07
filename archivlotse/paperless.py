@@ -4,6 +4,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
+from .ai.base import CHECK_TIMEOUT
 from .config import PaperlessConfig
 
 # Paperless's default page size is 25, which turns listing a few hundred
@@ -22,6 +23,12 @@ class PaperlessClient:
             headers={"Authorization": f"Token {config.token}"},
             timeout=timeout,
         )
+
+    def check(self) -> None:
+        """Raise unless Paperless is up and accepts the token. /api/profile/
+        because it answers in milliseconds - /api/tags/ took ~13 s on a live
+        ~8000-document instance, even with page_size=1."""
+        self._client.get("/api/profile/", timeout=CHECK_TIMEOUT).raise_for_status()
 
     def get_document(self, document_id: int) -> dict:
         response = self._client.get(f"/api/documents/{document_id}/")
@@ -62,17 +69,26 @@ class PaperlessClient:
         return self._list_all("/api/custom_fields/", params={"page_size": _LIST_PAGE_SIZE})
 
     def list_documents(
-        self, tags_all: list[int] | None = None, tags_none: list[int] | None = None
+        self,
+        tags_all: list[int] | None = None,
+        tags_none: list[int] | None = None,
+        document_types: list[int] | None = None,
     ) -> list[dict]:
-        """Fetch all documents (only id, title, tags) that carry ALL of
-        `tags_all` and NONE of `tags_none`, following pagination. Restricting
-        `fields` keeps the full OCR text out of what may be thousands of
-        list entries."""
-        params: dict = {"page_size": _LIST_PAGE_SIZE, "fields": "id,title,tags"}
+        """Fetch all documents (only id, title, tags, document_type,
+        custom_fields) that carry ALL of `tags_all`, NONE of `tags_none`
+        and, if given, one of the `document_types`, following pagination.
+        Restricting `fields` keeps the full OCR text out of what may be
+        thousands of list entries."""
+        params: dict = {
+            "page_size": _LIST_PAGE_SIZE,
+            "fields": "id,title,tags,document_type,custom_fields",
+        }
         if tags_all:
             params["tags__id__all"] = ",".join(str(tag_id) for tag_id in tags_all)
         if tags_none:
             params["tags__id__none"] = ",".join(str(tag_id) for tag_id in tags_none)
+        if document_types:
+            params["document_type__id__in"] = ",".join(str(type_id) for type_id in document_types)
         return self._list_all("/api/documents/", params=params)
 
     def download_original(self, document_id: int) -> bytes:

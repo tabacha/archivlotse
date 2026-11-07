@@ -10,3 +10,4 @@ config/paperless.yaml
 config/ai.yaml
 *.db
 *~
+.env
