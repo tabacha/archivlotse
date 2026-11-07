@@ -2,7 +2,8 @@
 # Dokumente + Batch-Jobs mit cron: aus config/batch.yaml.
 #
 #   cp .env.example .env     # Tokens eintragen
-#   docker compose up -d --build
+#   docker compose pull && docker compose up -d   # fertiges Image
+#   docker compose up -d --build                  # oder lokal bauen
 #   docker compose logs -f archivlotse
 #
 # Einmalige Befehle im selben Container-Setup:
@@ -11,6 +12,10 @@
 
 services:
   archivlotse:
+    # Fertiges Image aus der GitHub-Registry (von .github/workflows/docker.yml
+    # gebaut): "docker compose pull && docker compose up -d". Mit
+    # "docker compose up -d --build" wird stattdessen lokal gebaut.
+    image: ghcr.io/tabacha/archivlotse:latest
     build: .
     restart: unless-stopped
     env_file: .env

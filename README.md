@@ -1,5 +1,25 @@
 # ArchivLotse – Erste Schritte
 
+ArchivLotse räumt die Dokumente in [Paperless-ngx](https://docs.paperless-ngx.com/)
+mit Hilfe von KI auf: Es erkennt gescannte Dokumente per OCR neu, bestimmt
+Dokumenttyp, Korrespondent, Datum und passende Tags, vergibt
+aussagekräftige Titel und füllt Zusatzfelder wie Geldbetrag oder
+Rechnungsnummer. Das läuft für einzelne Dokumente, als Batch über viele
+Dokumente oder automatisch als Dienst, den Paperless per Webhook anstößt.
+
+Dabei gilt: so wenig KI wie nötig, so viel Nachvollziehbarkeit wie möglich.
+Die KI macht nur Vorschläge, ArchivLotse prüft sie, bevor etwas
+geschrieben wird. Es werden nur Tags, Dokumenttypen und Korrespondenten
+gewählt, die es in Paperless schon gibt – neue legt ArchivLotse nie an.
+Schon gefüllte Zusatzfelder, ein von Hand korrigierter OCR-Text und ein
+vorhandenes Datum (durch eine unsichere Schätzung) werden nicht
+überschrieben, und jede Änderung landet mit altem und neuem Wert in einem
+eigenen Protokoll. Paperless
+bleibt dabei das führende System, die Originaldateien werden nie
+verändert. Welche Schritte laufen, welche Prompts und welche KI-Modelle
+(lokal mit Ollama/Docling oder in der EU-Cloud bei Scaleway) benutzt
+werden, steht in YAML-Dateien und lässt sich ohne Programmieren anpassen.
+
 Diese Anleitung ist für den Einstieg gedacht: Du brauchst dafür keine
 Vorkenntnisse in Python-Paketierung.
 
@@ -688,10 +708,16 @@ Container startet `archivlotse serve`, bindet `./config` (nur lesend, inkl.
 
 ```bash
 cp .env.example .env          # ARCHIVLOTSE_WEBHOOK_TOKEN, PAPERLESS_TOKEN, ... eintragen
-docker compose up -d --build
+docker compose pull && docker compose up -d   # fertiges Image von ghcr.io
+docker compose up -d --build                  # oder selbst bauen
 docker compose logs -f archivlotse
 docker compose run --rm archivlotse process 6023 --dry-run   # Einzelbefehle gehen auch
 ```
+
+Das fertige Image `ghcr.io/tabacha/archivlotse` (amd64) baut
+eine GitHub-Action (`.github/workflows/docker.yml`) nach erfolgreichen
+Tests bei jedem Push auf `main` (`:latest`) und bei Versions-Tags `v*`
+(z. B. `:1.2.3`).
 
 Im Container ist `127.0.0.1` der Container selbst: in `config/ai.yaml`
 für Docling `base_url: "http://docling:5001"` eintragen, und Paperless
