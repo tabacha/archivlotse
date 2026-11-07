@@ -11,3 +11,4 @@ config/ai.yaml
 *.db
 *~
 .env
+config/prompts.private/

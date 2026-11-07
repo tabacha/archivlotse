@@ -13,3 +13,4 @@ doc
 .env
 config/paperless.yaml
 config/ai.yaml
+config/prompts.private
